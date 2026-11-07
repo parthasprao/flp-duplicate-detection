@@ -124,6 +124,12 @@ python -m triage.cli classify \
 streamlit run app/streamlit_app.py
 ```
 
+For a first try, choose **Synthetic demo (practice only)** in the Dataset selector.
+It uses sample records from this repository, not live CourtListener cases. Review
+decisions stay in the current browser session, so download the decision log before
+leaving if you need to keep or share your work. Dry-run proposals include only
+reviewed merge decisions and do not change the CourtListener database.
+
 The app features:
 - **Dual-Mode Review:** Switch between **Blind Review** (unanchored review with post-judgment reveal) and **Agent-Guided Co-Pilot Mode**.
 - **Visual Signals:** Side-by-side metadata comparisons with automated conflict indicators and excerpt text viewers.
