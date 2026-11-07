@@ -80,12 +80,10 @@ def load_all_data(
 ) -> tuple[list[dict], dict]:
     """Cache by source identity; never use held-out data for UI development."""
     path = Path(source)
-    if path.name == "dev_silver.jsonl":
+    if path.name in {"dev_silver.jsonl", "hard_negatives.jsonl", "adjudicate_me.jsonl"}:
         records = load_development_splits(path)
     else:
-        records = load_dataset(path)
-        # Unlabeled candidates/demo fixtures are permitted; held-out rows are not.
-        records = [r for r in records if r.get("split") != "test"]
+        records = [r for r in load_dataset(path) if r.get("split") != "test"]
     classifier = CalibratedTriageClassifier()
     if training_path:
         classifier.fit(load_development_splits(training_path, splits=("training",)))
@@ -111,6 +109,8 @@ def load_all_data(
 
 def export_bytes(decisions: list[dict]) -> tuple[bytes, bytes]:
     """Use the existing exporters without shared server-side output files."""
+    if not decisions:
+        return b"", b"[]"
     with TemporaryDirectory(prefix="courtlistener-review-") as directory:
         csv_path = Path(directory) / "decisions.csv"
         json_path = Path(directory) / "dry_run.json"
@@ -292,7 +292,7 @@ def render_decisions(pair: dict, mode: str, demo: bool) -> None:
         ("Defer", LABEL_INSUFFICIENT),
     ]
     for column, (title, label) in zip(st.columns(4), actions):
-        column.button(title, key=f"decision_{label}", use_container_width=True,
+        column.button(title, key=f"decision_{pid}_{label}", use_container_width=True,
                       disabled=label in MERGE_LABELS and not valid_ids,
                       on_click=record_decision, args=(pair, label, mode, demo))
     st.caption("Records a review decision only. No CourtListener database changes are executed.")
@@ -418,8 +418,9 @@ def main() -> None:
                     st.session_state.agent_results[pid] = (
                         run_offline_falsification(pair) if demo else analyze_with_agent(pair)
                     )
-                except Exception:
+                except Exception as exc:
                     st.warning("The analysis could not complete. Your review decisions are unchanged.")
+                    st.caption(f"Reason: {type(exc).__name__} — {exc}")
         result = st.session_state.agent_results.get(pid)
         if result:
             st.caption(f"Inference tier: {result.get('tier', 'offline')} · "
