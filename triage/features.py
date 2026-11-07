@@ -114,8 +114,10 @@ def detect_caption_role_conflict(low: Dict[str, Any], high: Dict[str, Any]) -> T
     The word sets match but the movant/appellant designation moved, which means two
     separate motions or appeals by different parties, not one decision twice.
     """
-    full_low = (low.get("case_name_full") or "").strip()
-    full_high = (high.get("case_name_full") or "").strip()
+    low_d = low or {}
+    high_d = high or {}
+    full_low = (low_d.get("case_name_full") or "").strip()
+    full_high = (high_d.get("case_name_full") or "").strip()
     if not full_low or not full_high:
         return False, ""
     if not (_ROLE_WORDS.search(full_low) and _ROLE_WORDS.search(full_high)):
@@ -132,9 +134,9 @@ def detect_caption_role_conflict(low: Dict[str, Any], high: Dict[str, Any]) -> T
 
 def extract_enriched_features(row: Dict[str, Any]) -> Dict[str, Any]:
     """Extract and derive all operational features for a pair."""
-    feat = row.get("features", {})
-    low = row.get("cluster_low", {})
-    high = row.get("cluster_high", {})
+    feat = row.get("features") or {}
+    low = row.get("cluster_low") or {}
+    high = row.get("cluster_high") or {}
     exc_low = row.get("excerpt_low", "") or ""
     exc_high = row.get("excerpt_high", "") or ""
 

@@ -88,7 +88,8 @@ def _is_surname_only_government_caption(title: str) -> bool:
     left, right = (part.strip(" .,") for part in lower.split(" v. ", 1))
 
     def _is_gov(part: str) -> bool:
-        return part in GOVERNMENT_PARTIES or any(part.startswith(g + " of ") for g in GOVERNMENT_PARTIES)
+        norm = part[4:].strip() if part.startswith("the ") else part
+        return norm in GOVERNMENT_PARTIES or any(norm.startswith(g + " of ") for g in GOVERNMENT_PARTIES) or part in GOVERNMENT_PARTIES
 
     def _single_name(part: str) -> bool:
         return len(_name_words(part)) <= 1
@@ -279,7 +280,15 @@ def classify_pair_rule(row: Dict[str, Any]) -> Tuple[str, float, List[str], List
             f"Recurring government-v-surname caption with materially different texts (length ratio: {f['len_ratio']:.2f}) "
             "and no shared docket or citation: distinct defendants"
         )
-        contradicting.append("Identical caption, court and filing date")
+        matches = []
+        if f["title_exact"]:
+            matches.append("caption")
+        if f["same_court"]:
+            matches.append("court")
+        if f["delta_days"] == 0:
+            matches.append("filing date")
+        if matches:
+            contradicting.append(f"Matching {' and '.join(matches)}")
         return LABEL_UNRELATED, 0.85, supporting, contradicting
 
     # Distinct defendant parties check (Smith, E. vs Smith, M.)
@@ -319,7 +328,6 @@ def classify_pair_rule(row: Dict[str, Any]) -> Tuple[str, float, List[str], List
         f["same_doc_num"]
         and f["same_court"]
         and f["title_exact"]
-        and not generic_surname_caption
         and f["delta_days"] is not None
         and f["delta_days"] >= 1
         and f["min_ham"] is not None

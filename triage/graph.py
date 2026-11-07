@@ -156,9 +156,19 @@ HUB_MERGE_DEGREE = 4
 
 
 def _pair_clusters(r: Dict[str, Any]) -> Tuple[int, int]:
-    feat = r.get("features", {})
-    c1 = int(feat.get("cluster_id_low") or r.get("cluster_low", {}).get("cluster_id"))
-    c2 = int(feat.get("cluster_id_high") or r.get("cluster_high", {}).get("cluster_id"))
+    feat = r.get("features") or {}
+    low = r.get("cluster_low") or {}
+    high = r.get("cluster_high") or {}
+    c1 = feat.get("cluster_id_low") or low.get("cluster_id")
+    c2 = feat.get("cluster_id_high") or high.get("cluster_id")
+    if c1 is None or c2 is None:
+        parts = str(r.get("pair_id", "")).split("-")
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            c1, c2 = int(parts[0]), int(parts[1])
+        else:
+            c1, c2 = int(c1 or 0), int(c2 or 0)
+    else:
+        c1, c2 = int(c1), int(c2)
     return min(c1, c2), max(c1, c2)
 
 
