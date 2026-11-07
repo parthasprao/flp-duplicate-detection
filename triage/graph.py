@@ -152,6 +152,58 @@ def detect_graph_contradictions(
     return dict(contradictions)
 
 
+HUB_MERGE_DEGREE = 4
+
+
+def _pair_clusters(r: Dict[str, Any]) -> Tuple[int, int]:
+    feat = r.get("features", {})
+    c1 = int(feat.get("cluster_id_low") or r.get("cluster_low", {}).get("cluster_id"))
+    c2 = int(feat.get("cluster_id_high") or r.get("cluster_high", {}).get("cluster_id"))
+    return min(c1, c2), max(c1, c2)
+
+
+def detect_hub_clusters(
+    predictions: List[Dict[str, Any]],
+    components: Dict[str, Dict[str, Any]],
+    min_degree: int = HUB_MERGE_DEGREE,
+) -> Dict[str, List[str]]:
+    """Flag clusters proposed for merging with `min_degree` or more other clusters.
+
+    A hub means one redirect would fold a whole family together, so every merge
+    edge touching the hub is routed for family-level review.
+
+    Returns:
+        Mapping of pair_id -> list of hub warnings.
+    """
+    pred_map = {p["pair_id"]: p for p in predictions}
+    warnings: Dict[str, List[str]] = collections.defaultdict(list)
+
+    for comp_id, comp in components.items():
+        merge_pairs: List[Tuple[str, int, int]] = []
+        degree: Dict[int, int] = collections.Counter()
+        for r in comp["pairs"]:
+            pid = r["pair_id"]
+            label = pred_map.get(pid, {}).get("label", r.get("rule_class"))
+            if label not in MERGE_LABELS:
+                continue
+            u, v = _pair_clusters(r)
+            merge_pairs.append((pid, u, v))
+            degree[u] += 1
+            degree[v] += 1
+
+        hubs = {c for c, d in degree.items() if d >= min_degree}
+        for hub in sorted(hubs):
+            msg = (
+                f"Hub cluster {hub} in {comp_id} has {degree[hub]} proposed merges; "
+                f"review the whole family of {len(comp['cluster_ids'])} clusters before any redirect"
+            )
+            for pid, u, v in merge_pairs:
+                if hub in (u, v):
+                    warnings[pid].append(msg)
+
+    return dict(warnings)
+
+
 def reconcile_graph_predictions(
     predictions: List[Dict[str, Any]],
     components: Dict[str, Dict[str, Any]],
@@ -164,6 +216,7 @@ def reconcile_graph_predictions(
     - If confidence is not near-certain (> 0.95), downgrade merge to insufficient_evidence to prevent unsafe merge.
     """
     contradictions = detect_graph_contradictions(predictions, components)
+    hubs = detect_hub_clusters(predictions, components)
 
     # Component map by pair_id
     pair_to_comp: Dict[str, str] = {}
@@ -175,6 +228,9 @@ def reconcile_graph_predictions(
     for p in predictions:
         pid = p["pair_id"]
         rec = dict(p)
+        # Copy the evidence lists so warnings never leak back into the caller's predictions.
+        ev = p.get("evidence") or {}
+        rec["evidence"] = {k: list(v) if isinstance(v, list) else v for k, v in ev.items()}
         rec["component_id"] = pair_to_comp.get(pid, "unknown")
 
         if pid in contradictions:
@@ -191,6 +247,13 @@ def reconcile_graph_predictions(
                 rec.setdefault("evidence", {}).setdefault("supporting", []).append(
                     "Transitive contradiction between candidate pairs requires human adjudication"
                 )
+
+        if pid in hubs:
+            # A hub is a review-order signal, not evidence against the merge: escalate only.
+            rec["priority"] = PRIORITY_CRITICAL
+            if pid not in contradictions:
+                rec["routing_reason"] = "Hub cluster: review the whole case family before merging"
+            rec.setdefault("evidence", {}).setdefault("contradicting", []).extend(hubs[pid])
 
         reconciled.append(rec)
 

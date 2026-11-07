@@ -53,32 +53,81 @@ def is_stock_postconviction_or_summary(text: str) -> bool:
     return any(p in lower for p in stock_phrases)
 
 
+# A formal decree's caption block carries a heading line such as "JUDGMENT" or
+# "JUDGMENT RENDERED JUNE 30, 2016" (Texas courts of appeals use this layout).
+_JUDGMENT_HEADING = re.compile(r"^\s*JUDGMENT(?:\s+RENDERED\b[^\n]*)?\s*$", re.MULTILINE)
+_OPINION_HEADING = re.compile(r"^\s*(?:MEMORANDUM\s+)?OPINION\b[^\n]*$", re.MULTILINE)
+_HEADER_WINDOW = 800
+
+
+def _instrument_type(text: str) -> str:
+    """Classify an excerpt's header as 'judgment', 'opinion' or '' (unknown)."""
+    head = (text or "")[:_HEADER_WINDOW]
+    if not head.strip():
+        return ""
+    if _JUDGMENT_HEADING.search(head):
+        return "judgment"
+    if _OPINION_HEADING.search(head):
+        return "opinion"
+    return "other"
+
+
 def detect_judgment_vs_opinion(
     low: Any,
     high: Any,
     exc_low: str = "",
     exc_high: str = "",
 ) -> Tuple[bool, str]:
-    """Detect if one cluster represents a judgment/order and the other an opinion."""
+    """Detect a companion-instrument pair: one record is the formal judgment, the other the opinion.
+
+    Each side is classified separately from its own header, so the pair only counts
+    as a companion when exactly one side carries a stand-alone JUDGMENT heading and
+    the other side is an opinion (or some other non-judgment document).
+    """
     if isinstance(low, str) and isinstance(high, str):
-        all_text = f"{low.lower()} {high.lower()}"
+        text_low, text_high = low, high
     else:
-        low_d = low if isinstance(low, dict) else {}
-        high_d = high if isinstance(high, dict) else {}
-        parts = [
-            (low_d.get("case_name") or "").lower(),
-            (high_d.get("case_name") or "").lower(),
-            (low_d.get("case_name_full") or "").lower(),
-            (high_d.get("case_name_full") or "").lower(),
-            (exc_low or "")[:200].lower(),
-            (exc_high or "")[:200].lower(),
-        ]
-        all_text = " ".join(parts)
-    has_judgment = "judgment" in all_text or "order" in all_text
-    has_opinion = "opinion" in all_text or "memorandum" in all_text
-    if has_judgment and has_opinion:
-        return True, "One record appears to be a separate judgment/order while the other is an explanatory opinion"
+        text_low, text_high = exc_low or "", exc_high or ""
+
+    kind_low = _instrument_type(text_low)
+    kind_high = _instrument_type(text_high)
+    if not kind_low or not kind_high:
+        return False, ""
+    if (kind_low == "judgment") != (kind_high == "judgment"):
+        return True, (
+            "One record is the court's separate formal judgment and the other is the "
+            "explanatory opinion (companion instruments issued together, not one document twice)"
+        )
     return False, ""
+
+
+# Procedural role designations that appear in full captions.
+_ROLE_WORDS = re.compile(
+    r"\b(movant|appellant|appellee|petitioner|respondent|intervenor|cross)\b", re.IGNORECASE
+)
+
+
+def detect_caption_role_conflict(low: Dict[str, Any], high: Dict[str, Any]) -> Tuple[bool, str]:
+    """Same parties, but the full captions assign a procedural role to a different party.
+
+    Example shape: "A v. B, DEFENDANT-MOVANT, AND C" vs "A v. B, AND C, DEFENDANT-MOVANT".
+    The word sets match but the movant/appellant designation moved, which means two
+    separate motions or appeals by different parties, not one decision twice.
+    """
+    full_low = (low.get("case_name_full") or "").strip()
+    full_high = (high.get("case_name_full") or "").strip()
+    if not full_low or not full_high:
+        return False, ""
+    if not (_ROLE_WORDS.search(full_low) and _ROLE_WORDS.search(full_high)):
+        return False, ""
+    toks_low = _tokenize(full_low)
+    toks_high = _tokenize(full_high)
+    if toks_low == toks_high or sorted(toks_low) != sorted(toks_high):
+        return False, ""
+    return True, (
+        "Full captions name the same parties but assign the procedural role "
+        "(movant/appellant/petitioner) to a different party: separate motions or appeals"
+    )
 
 
 def extract_enriched_features(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -118,6 +167,7 @@ def extract_enriched_features(row: Dict[str, Any]) -> Dict[str, Any]:
 
     # Judgment vs opinion
     is_j_vs_op, j_vs_op_reason = detect_judgment_vs_opinion(low, high, exc_low, exc_high)
+    role_conflict, role_conflict_reason = detect_caption_role_conflict(low, high)
 
     # SCOTUS cert denial bug (CourtListener data quality defect)
     court_low = (low.get("court_id") or "").lower()
@@ -148,5 +198,7 @@ def extract_enriched_features(row: Dict[str, Any]) -> Dict[str, Any]:
         "is_stock": low_is_stock or high_is_stock,
         "is_j_vs_op": is_j_vs_op,
         "j_vs_op_reason": j_vs_op_reason,
+        "role_conflict": role_conflict,
+        "role_conflict_reason": role_conflict_reason,
         "is_scotus_cafc_cert_bug": is_scotus_cafc_cert_bug,
     }

@@ -48,6 +48,54 @@ def _is_recurring_generic_caption(title: str) -> bool:
     return any(lower.startswith(prefix) for prefix in RECURRING_PROSECUTOR_PREFIXES)
 
 
+GOVERNMENT_PARTIES = (
+    "state",
+    "the state",
+    "people",
+    "the people",
+    "united states",
+    "commonwealth",
+    "com",
+    "com.",
+    "u.s",
+    "u.s.",
+)
+
+
+def _is_surname_only_government_caption(title: str) -> bool:
+    """True for captions like "State v. Smith" or "Brown v. State".
+
+    One side is the government and the other is identified by a single name, so many
+    unrelated defendants share the exact same caption. A matching caption is therefore
+    no evidence that two records come from the same litigation.
+    """
+    if not title:
+        return False
+    lower = title.lower().strip()
+
+    def _name_words(part: str) -> List[str]:
+        # Drop court/district designations ("ca2/6") and initials ("j.", "i.f.").
+        words = [w for w in re.split(r"[\s,]+", part) if w and not re.search(r"\d", w)]
+        return [w for w in (re.sub(r"[^a-z]", "", w) for w in words) if len(w) >= 2]
+
+    # "In re I.F.", "In re Smith": a matter caption with at most one real name word.
+    for prefix in ("in re ", "in the matter of "):
+        if lower.startswith(prefix):
+            return len(_name_words(lower[len(prefix):])) <= 1
+
+    if " v. " not in lower:
+        return False
+    left, right = (part.strip(" .,") for part in lower.split(" v. ", 1))
+
+    def _is_gov(part: str) -> bool:
+        return part in GOVERNMENT_PARTIES or any(part.startswith(g + " of ") for g in GOVERNMENT_PARTIES)
+
+    def _single_name(part: str) -> bool:
+        return len(_name_words(part)) <= 1
+
+    return (_is_gov(left) and _single_name(right)) or (_is_gov(right) and _single_name(left))
+
+
 def classify_pair_rule(row: Dict[str, Any]) -> Tuple[str, float, List[str], List[str]]:
     """Evaluate a candidate pair using an ordered, evidence-backed decision list.
 
@@ -73,6 +121,50 @@ def classify_pair_rule(row: Dict[str, Any]) -> Tuple[str, float, List[str], List
         )
         contradicting.append("Conflicting court assignments (scotus vs cafc) due to data extraction error")
         return LABEL_SHARED_PAGE, 0.95, supporting, contradicting
+
+    generic_surname_caption = _is_surname_only_government_caption(title_low) or _is_surname_only_government_caption(
+        title_high
+    )
+
+    # -------------------------------------------------------------------------
+    # RULE 1b: Companion Instruments (Role 3)
+    # Same parties, but the records are different instruments or different
+    # parties' motions issued in the same litigation. These must never merge.
+    # -------------------------------------------------------------------------
+    if f["role_conflict"] and f["same_court"]:
+        supporting.append(f["role_conflict_reason"])
+        contradicting.append("Identical party list, court and filing date")
+        return LABEL_RELATED_DECISION, 0.90, supporting, contradicting
+
+    if (
+        f["is_j_vs_op"]
+        and f["same_court"]
+        and (f["same_doc_num"] or f["title_exact"])
+        and not f["doc_conflict"]
+        and (f["delta_days"] is None or f["delta_days"] <= 7)
+    ):
+        supporting.append(f["j_vs_op_reason"])
+        contradicting.append("Same docket, court and filing date")
+        return LABEL_RELATED_DECISION, 0.88, supporting, contradicting
+
+    # -------------------------------------------------------------------------
+    # RULE 2a: Same Parties and Court, Different Docket Numbers (Role 3)
+    # A distinctive caption repeated under a different docket number in the same
+    # court is a companion appeal or a later stage of the same litigation.
+    # Generic "State v. Smith" style captions are excluded: there the shared
+    # caption says nothing about shared litigation.
+    # -------------------------------------------------------------------------
+    if f["doc_conflict"] and f["same_court"] and f["title_exact"] and not generic_surname_caption:
+        supporting.append(
+            "Same parties and court under different docket numbers: separate proceedings in the same "
+            f"litigation (companion appeal or later stage; filing date gap: {f['delta_days']} days)"
+        )
+        contradicting.append("Identical case caption")
+        if f["min_ham"] is not None and f["min_ham"] <= 3:
+            contradicting.append(
+                f"Near-identical text (Hamming distance: {f['min_ham']}); check whether the docket numbers differ only in formatting"
+            )
+        return LABEL_RELATED_DECISION, 0.88, supporting, contradicting
 
     # -------------------------------------------------------------------------
     # RULE 2: Conflicting Dockets or Stock Boilerplate Text (Trap Avoidance)
@@ -173,6 +265,23 @@ def classify_pair_rule(row: Dict[str, Any]) -> Tuple[str, float, List[str], List
             contradicting.append("Similar case caption")
             return LABEL_UNRELATED, 0.90, supporting, contradicting
 
+    # Generic surname-only caption with materially different texts and nothing else
+    # tying the records together (no shared docket, citation or parent court).
+    if (
+        generic_surname_caption
+        and f["shared_cits"] == 0
+        and not f["same_doc_num"]
+        and not f["parent_link"]
+        and f["len_ratio"] is not None
+        and f["len_ratio"] < 0.25
+    ):
+        supporting.append(
+            f"Recurring government-v-surname caption with materially different texts (length ratio: {f['len_ratio']:.2f}) "
+            "and no shared docket or citation: distinct defendants"
+        )
+        contradicting.append("Identical caption, court and filing date")
+        return LABEL_UNRELATED, 0.85, supporting, contradicting
+
     # Distinct defendant parties check (Smith, E. vs Smith, M.)
     if " v. " in title_low and " v. " in title_high:
         p1_low, p2_low = title_low.split(" v. ", 1)
@@ -203,6 +312,25 @@ def classify_pair_rule(row: Dict[str, Any]) -> Tuple[str, float, List[str], List
             )
             contradicting.append("Shared party names / case caption")
             return LABEL_RELATED_DECISION, 0.85, supporting, contradicting
+
+    # Separate rulings entered on different days in one docket (Role 3): the text
+    # differs beyond the version threshold, so these are two orders, not two copies.
+    if (
+        f["same_doc_num"]
+        and f["same_court"]
+        and f["title_exact"]
+        and not generic_surname_caption
+        and f["delta_days"] is not None
+        and f["delta_days"] >= 1
+        and f["min_ham"] is not None
+        and f["min_ham"] > 18
+    ):
+        supporting.append(
+            f"Same docket, but filed {f['delta_days']} day(s) apart with materially different text "
+            f"(Hamming distance: {f['min_ham']}): separate rulings in one case"
+        )
+        contradicting.append("Same docket number, court and caption")
+        return LABEL_RELATED_DECISION, 0.88, supporting, contradicting
 
     # -------------------------------------------------------------------------
     # RULE 10: Parallel Split Cluster (Split across reporters or opinions)
@@ -237,7 +365,16 @@ def classify_pair_rule(row: Dict[str, Any]) -> Tuple[str, float, List[str], List
         return LABEL_PROBABLE_VERSION, 0.84, supporting, contradicting
 
     # Excerpt Jaccard high match
-    if f["has_both_excerpts"] and f["token_jaccard"] >= 0.75 and f["same_court"] and f["title_exact"] and not f["doc_conflict"]:
+    # Excerpts are only the first few hundred characters (mostly caption headers), so
+    # their similarity must not override a full-text fingerprint that says they differ.
+    if (
+        f["has_both_excerpts"]
+        and f["token_jaccard"] >= 0.75
+        and f["same_court"]
+        and f["title_exact"]
+        and not f["doc_conflict"]
+        and (f["min_ham"] is None or f["min_ham"] <= 18)
+    ):
         supporting.append(f"High excerpt similarity (token Jaccard: {f['token_jaccard']:.2f})")
         return LABEL_PROBABLE_VERSION, 0.82, supporting, contradicting
 
