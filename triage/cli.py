@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import os
 import sys
@@ -226,8 +227,11 @@ def evaluate_command(args: argparse.Namespace) -> None:
     if high_conf_merge_total > 0:
         hcm_prec = high_conf_merge_tp / high_conf_merge_total
         print(f"High-Conf Merge Prec:    {high_conf_merge_tp}/{high_conf_merge_total} ({hcm_prec:.2%}) [SAFETY METRIC]")
-    print(f"Abstention Rate:         {abstentions}/{total} ({abstentions/total:.2%})")
-    print(f"Coverage Rate:           {(total - abstentions)}/{total} ({(total - abstentions)/total:.2%})\n")
+    abs_pct = (abstentions / total) if total > 0 else 0.0
+    cov_cnt = total - abstentions
+    cov_pct = (cov_cnt / total) if total > 0 else 0.0
+    print(f"Abstention Rate:         {abstentions}/{total} ({abs_pct:.2%})")
+    print(f"Coverage Rate:           {cov_cnt}/{total} ({cov_pct:.2%})\n")
 
     print(f"{'Class':<25} | {'Gold':<6} | {'Pred':<6} | {'TP':<4} | {'Prec':<7} | {'Recall':<7} | {'F1':<7}")
     print("-" * 75)
