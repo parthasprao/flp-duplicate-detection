@@ -148,3 +148,40 @@ When two records share a citation:
 - If `page_cluster_span >= 2` AND `min_hamming > 20`: Label as `shared_page_ambiguity`.
 - If `page_cluster_span <= 1` AND case names completely disagree: Label as `citation_data_error`.
 - If `min_hamming <= 15` AND parties match: Label as `probable_version` or `probable_duplicate`.
+
+---
+
+## Part 3: Role 3 Engine Notes (Lifecycle, Companions & Graph Consistency)
+
+Measured with `python -m triage.cli bench --role all` (training and validation splits only; test split untouched).
+
+| Metric | Before | After |
+|---|---|---|
+| `related_decision` F1 (Train / Val) | 47.1% / 50.0% | 84.6% / 72.7% |
+| `unrelated` F1 (Train / Val) | 44.4% / 58.8% | 55.6% / 62.5% |
+| Silver accuracy (Train / Val) | 50.0% / 48.1% | 60.5% / 55.6% |
+| Merge precision (Val) | 50.0% | 100.0% |
+| Lifecycle/caption hard-negative false merges (Val) | 4/16 | 2/16 |
+
+### What changed
+
+1. **Different docket numbers no longer mean "unrelated" by default.** A distinctive caption repeated in the same court under a different docket number is a companion appeal or a later stage of the same litigation (`related_decision`). The old rule labelled every docket conflict `unrelated` at 0.92 confidence.
+2. **Generic captions stay `unrelated`.** "State v. Smith", "Brown v. State", "Com. v. Taylor, J.", "People v. Young CA2/6" and "In re I.F." recur across unrelated people, so a matching caption is not evidence of shared litigation. A government party plus at most one real name word (initials and court codes ignored) counts as generic.
+3. **Companion instruments are detected per side.** A pair counts only when exactly one record's header carries a stand-alone `JUDGMENT` heading. The old check pooled both sides' text, so it fired on any pair mentioning "order" and "opinion" and missed real judgment/opinion pairs.
+4. **Role swaps in the full caption.** When both full captions list the same parties but a different party is the movant/appellant/petitioner, the records are separate motions or appeals.
+5. **Same docket, different day, different text.** Two filings on one docket on different days, with text past the version threshold (Hamming > 18), are separate rulings. Excerpt similarity can no longer override this, because the excerpts are mostly identical caption headers.
+6. **Hub clusters.** A cluster proposed to merge with 4 or more others is escalated to `CRITICAL` with a family-review warning. Its merge label is kept: a hub is a review-order signal, not evidence against the merge.
+7. **Bug fix.** `reconcile_graph_predictions` copied predictions shallowly, so warnings leaked into the caller's evidence lists. It now copies them.
+
+### Remaining validation false merges: why they were not "fixed"
+
+Both remaining rows are `hn-trap-*` rows: structural traps generated from pair features, with **no human or AI label**.
+
+- **hn-trap-107** (R.I. Superior Court, 1999): identical case name, full caption, court, date and docket number, and identical text fingerprint (Hamming 0, length ratio 1.0). On the evidence in the package this looks like a genuine duplicate ingested twice. Forcing it apart would mean refusing to merge byte-identical records.
+- **hn-trap-096** (M.D. Pa., 2024): same docket, filed 3 days apart, near-identical text (Hamming 15, length ratio 0.999). Consistent with a corrected re-filing (`probable_version`).
+
+Recommendation: check both on CourtListener before treating them as true negatives. If they are real duplicates, the trap generator mislabels "same title/court/year" and "same docket, a few days apart" families.
+
+### Open guide question
+
+The package README says a judgment and an opinion filed as separate clusters should be labelled `insufficient_evidence`, because the v1 label set has no fitting label. The team's Role 3 brief asks for `related_decision`. The engine follows the team brief, and both are keep-separate, so merge safety is unaffected. The `companion_instrument` label proposed above would settle this.
