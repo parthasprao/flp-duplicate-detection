@@ -18,7 +18,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from triage.constants import (
     KEEP_SEPARATE_LABELS,
     LABEL_CITATION_ERROR,
-    LABEL_INSUFFICIENT,
+    LABEL_CITATION_TOPOLOGY_UNVERIFIED,
     LABEL_PARALLEL_SPLIT,
     LABEL_PROBABLE_DUPLICATE,
     LABEL_PROBABLE_VERSION,
@@ -27,6 +27,7 @@ from triage.constants import (
     LABEL_UNRELATED,
     MERGE_LABELS,
     PRIORITY_CRITICAL,
+    REVIEW_REQUIRED_LABELS,
 )
 from triage.graph import (
     build_connected_components,
@@ -34,7 +35,7 @@ from triage.graph import (
     reconcile_graph_predictions,
 )
 from triage.io import find_default_data_dir, load_dataset, load_development_splits
-from triage.model import CLASS_ORDER, CalibratedTriageClassifier
+from triage.model import METRIC_CLASS_ORDER, CalibratedTriageClassifier
 from triage.route import assign_queue_priority
 
 
@@ -75,7 +76,7 @@ def _compute_split_metrics(
         per_class_pred[pred] += 1
         confusion[(gold, pred)] += 1
 
-        if pred == LABEL_INSUFFICIENT:
+        if pred in REVIEW_REQUIRED_LABELS:
             abstentions += 1
         if pred == gold:
             correct += 1
@@ -102,7 +103,7 @@ def _compute_split_metrics(
 
     per_class: Dict[str, Dict[str, float]] = {}
     f1_supported: List[float] = []
-    for cls in CLASS_ORDER:
+    for cls in METRIC_CLASS_ORDER:
         g_cnt = per_class_gold[cls]
         p_cnt = per_class_pred[cls]
         tp = per_class_tp[cls]
@@ -273,12 +274,12 @@ def run_role2_bench(data_dir: Optional[Path] = None, verbose: bool = True) -> Di
         print("\n" + "=" * 78)
         print("ROLE 2 BENCHMARK: Citation Topology & Page Disambiguator (TEST SPLIT LOCKED)")
         print("=" * 78)
-        for cls in (LABEL_SHARED_PAGE, LABEL_CITATION_ERROR):
+        for cls in (LABEL_SHARED_PAGE, LABEL_CITATION_ERROR, LABEL_CITATION_TOPOLOGY_UNVERIFIED):
             ct = m_train["per_class"][cls]
             cv = m_val["per_class"][cls]
             print(
-                f"  {cls:24s} | Train F1: {ct['f1']:5.1%} (P={ct['precision']:5.1%}, R={ct['recall']:5.1%}, n={ct['gold']}) "
-                f"| Val F1: {cv['f1']:5.1%} (P={cv['precision']:5.1%}, R={cv['recall']:5.1%}, n={cv['gold']})"
+                f"  {cls:30s} | Train F1: {ct['f1']:5.1%} (P={ct['precision']:5.1%}, R={ct['recall']:5.1%}, gold={ct['gold']}, pred={ct['pred']}) "
+                f"| Val F1: {cv['f1']:5.1%} (P={cv['precision']:5.1%}, R={cv['recall']:5.1%}, gold={cv['gold']}, pred={cv['pred']})"
             )
         print(
             f"Hard-Negative Citation/Page False Merges (Val): {hn_cit_false_merges}/{len(hn_cit_val)} "
@@ -290,6 +291,8 @@ def run_role2_bench(data_dir: Optional[Path] = None, verbose: bool = True) -> Di
         "validation": m_val,
         "hn_cit_val_false_merges": hn_cit_false_merges,
         "hn_cit_val_total": len(hn_cit_val),
+        "topology_unverified_train_predictions": m_train["per_class"][LABEL_CITATION_TOPOLOGY_UNVERIFIED]["pred"],
+        "topology_unverified_val_predictions": m_val["per_class"][LABEL_CITATION_TOPOLOGY_UNVERIFIED]["pred"],
     }
 
 

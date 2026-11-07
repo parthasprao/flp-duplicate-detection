@@ -17,6 +17,8 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from triage.constants import (
+    LABEL_CITATION_ERROR,
+    LABEL_CITATION_TOPOLOGY_UNVERIFIED,
     LABEL_INSUFFICIENT,
     LABEL_PARALLEL_SPLIT,
     LABEL_PROBABLE_DUPLICATE,
@@ -45,14 +47,15 @@ parallel_split_cluster  One decision split across parallel reporters or majority
 related_decision        Legally related but DISTINCT (same litigation at different stages, rehearing, remand)
 shared_page_ambiguity   A reporter page or table holding several different decisions; NOT the same decision
 citation_data_error     Records are distinct; a citation attached to one or both is erroneous
+citation_topology_unverified  Records share a citation, but available evidence cannot establish whether the physical page contains multiple decisions or the citation was attached incorrectly; require human/source review
 unrelated               Different decisions with superficial metadata overlap
 insufficient_evidence   Evidence cannot settle it; ABSTAIN rather than guess
 
 Output valid JSON matching this schema:
 {
-  "label": "<one of the 8 labels>",
+  "label": "<one of the 9 labels>",
   "confidence": <float 0.0 to 1.0>,
-  "falsification_finding": "<one concrete fact that breaks the merge, or 'None found after checking court, docket, dates, page span, and text'>",
+  "falsification_finding": "<one concrete fact that breaks the merge, or 'None found after checking court, docket, dates, page occupancy, and text'>",
   "supporting_evidence": ["<evidence 1>", "<evidence 2>"],
   "contradicting_evidence": ["<contradiction 1>"],
   "maintainer_summary": "<two concise sentences explaining recommendation to a CourtListener maintainer>"
@@ -94,24 +97,62 @@ PAIR FEATURES:
   Same court: {feat.get('same_court')}
   Filing date delta: {feat.get('filing_date_delta_days')} days
   Shared citations: {feat.get('shared_citations')}
-  Max page span: {max(feat.get('min_page_cluster_span', 0) or 0, feat.get('max_page_cluster_span', 0) or 0)}
+  Reporter pages spanned by each cluster: {max(feat.get('min_page_cluster_span', 0) or 0, feat.get('max_page_cluster_span', 0) or 0)}
+  Distinct decisions verified on the shared page: {feat.get('distinct_decisions_on_shared_page')}
   Hamming distance: {feat.get('min_hamming')}
   Text length ratio: {feat.get('text_length_ratio')}
   Shared SHA-1: {feat.get('shared_sha1')}
 """
 
 
+def _has_same_decision_evidence(features: Dict[str, Any]) -> bool:
+    """Return whether shared records have enough identity evidence to avoid topology review."""
+    exact_ingestion = (
+        (features["shared_sha1"] or features["shared_text_sha"])
+        and features["same_court"]
+        and features["title_exact"]
+        and not features["doc_conflict"]
+    )
+    near_identity = (
+        not features["doc_conflict"]
+        and features["same_court"]
+        and features["min_ham"] is not None
+        and features["min_ham"] <= 12
+        and features["len_ratio"] is not None
+        and features["len_ratio"] >= 0.65
+        and (features["title_exact"] or features["token_jaccard"] >= 0.5)
+    )
+    return bool(exact_ingestion or near_identity)
+
+
 def is_complex_pair(row: Dict[str, Any]) -> Tuple[bool, str]:
     """Determine whether a candidate pair requires deep reasoning (Nemotron) or simple check (GLM Flash)."""
     f = extract_enriched_features(row)
 
-    # 1. Docket conflicts
+    # 1. Shared citation without page-occupancy evidence
+    if (
+        f["shared_cits"] >= 1
+        and f["distinct_decisions_on_shared_page"] is None
+        and not _has_same_decision_evidence(f)
+    ):
+        reason = "Shared citation lacks page-occupancy evidence; page span alone cannot settle topology"
+        if f["doc_conflict"]:
+            reason += " and docket numbers conflict"
+        if f["len_ratio"] is not None and f["len_ratio"] < 0.35:
+            reason += "; severe text length disparity also needs review"
+        return True, reason
+
+    # 2. Docket conflicts
     if f["doc_conflict"]:
         return True, "Conflicting docket numbers detected"
 
-    # 2. Multi-cluster reporter page spans
-    if f["max_page_span"] >= 2:
-        return True, f"Multi-cluster page span ({f['max_page_span']}) creates shared-page risk"
+    if f["distinct_decisions_on_shared_page"] is not None and f["distinct_decisions_on_shared_page"] >= 2:
+        return True, f"Page-level evidence confirms {f['distinct_decisions_on_shared_page']} distinct decisions"
+
+    if f["shared_cits"] >= 1 and f["distinct_decisions_on_shared_page"] == 1 and (
+        f["doc_conflict"] or not f["same_court"] or not f["title_exact"]
+    ):
+        return True, "One decision is verified on the page but the shared citation conflicts with case metadata"
 
     # 3. Severe text length disparity
     if f["len_ratio"] is not None and f["len_ratio"] < 0.35:
@@ -202,10 +243,20 @@ def run_offline_falsification(row: Dict[str, Any]) -> Dict[str, Any]:
             f"Different courts ({low.get('court_id')} vs {high.get('court_id')}) with no appellate link"
         )
 
-    # 3. Check for page span ambiguity
-    if f["max_page_span"] >= 2 and f["shared_cits"] >= 1 and (not f["same_court"] or not f["title_exact"]):
+    # 3. Check citation topology using page-level evidence, not cluster span.
+    page_case_count = f["distinct_decisions_on_shared_page"]
+    conflicting_metadata = f["doc_conflict"] or not f["same_court"] or not f["title_exact"]
+    if f["shared_cits"] >= 1 and page_case_count is None and not _has_same_decision_evidence(f):
         reasons_to_falsify.append(
-            f"Reporter page span of {f['max_page_span']} clusters indicates multiple short rulings on one page"
+            "Shared citation has no verified page-occupancy count; cannot distinguish a multi-decision page from a citation attachment error"
+        )
+    elif f["shared_cits"] >= 1 and page_case_count == 1 and conflicting_metadata:
+        reasons_to_falsify.append(
+            "Page-level evidence shows one decision while the records have conflicting metadata for the shared citation"
+        )
+    elif f["shared_cits"] >= 1 and page_case_count is not None and page_case_count >= 2 and conflicting_metadata:
+        reasons_to_falsify.append(
+            f"Page-level evidence confirms {page_case_count} distinct decisions on the cited page"
         )
 
     # 4. Check for length disparity
@@ -225,7 +276,11 @@ def run_offline_falsification(row: Dict[str, Any]) -> Dict[str, Any]:
         falsified_label = LABEL_UNRELATED
         if f["same_doc_num"] or f["title_exact"]:
             falsified_label = LABEL_RELATED_DECISION
-        if f["max_page_span"] >= 2 and f["shared_cits"] >= 1:
+        if f["shared_cits"] >= 1 and page_case_count is None and conflicting_metadata:
+            falsified_label = LABEL_CITATION_TOPOLOGY_UNVERIFIED
+        elif f["shared_cits"] >= 1 and page_case_count == 1 and conflicting_metadata:
+            falsified_label = LABEL_CITATION_ERROR
+        elif f["shared_cits"] >= 1 and page_case_count is not None and page_case_count >= 2:
             falsified_label = LABEL_SHARED_PAGE
 
         return {
