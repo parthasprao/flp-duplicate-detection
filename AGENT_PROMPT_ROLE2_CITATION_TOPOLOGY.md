@@ -3,7 +3,7 @@
 **Role:** Citation Topology & Reporter Page Disambiguator  
 **Repository:** `flp-duplicate-detection`  
 **Target Audience:** Free Law Project (FLP) / CourtListener Data Maintainers  
-**Safety Mandate:** Wrongly merging distinct decisions printed on the same reporter page is a frequent source of database corruption in CourtListener. You must ensure multi-case reporter pages are flagged as `shared_page_ambiguity` rather than collapsed or mislabeled as `unrelated`.
+**Safety Mandate:** Wrongly merging distinct decisions printed on the same reporter page is a frequent source of database corruption in CourtListener. Use `shared_page_ambiguity` when page-level evidence confirms multiple decisions; when that evidence is missing, use `citation_topology_unverified` rather than guessing or merging.
 
 ---
 
@@ -35,32 +35,36 @@ You own the **citation topology, reporter page span analysis, and data quality d
 
 Our current evaluation on the development splits reveals two major failure modes:
 
-### Problem A: Shared Reporter Pages Falsely Preempted by `docket_numbers_conflict` (`unrelated`)
-In `dev_silver.jsonl`, a large group of pairs sharing a reporter page (`max_page_cluster_span >= 2` and `shared_citations >= 1`) are currently predicted as `unrelated` instead of `shared_page_ambiguity`.
-- *Why this happens:* In `triage/rules.py`, Rule 2 (`if f["doc_conflict"] and not f["shared_sha1"]: return LABEL_UNRELATED`) currently runs **before** Rule 3 (`if f["max_page_span"] >= 2 and f["shared_cits"] > 0: return LABEL_SHARED_PAGE`).
-- *Legal/Structural Reality:* When two distinct summary dispositions are printed on the top and bottom of the same physical reporter page, they are different cases—so they **always** have different docket numbers (`doc_conflict == True`)! Having conflicting docket numbers while sharing a multi-case reporter page (`max_page_span >= 2` and `shared_cits >= 1`) is the defining signature of `shared_page_ambiguity`, NOT `unrelated`!
+### Problem A: Shared-Page Candidates Falsely Preempted by `docket_numbers_conflict` (`unrelated`)
+In `dev_silver.jsonl`, a group of pairs with shared citations and page-span lengths greater than one were predicted as `unrelated`. The page-span field alone does not establish that several cases occupy the same physical page. Treat these as `citation_topology_unverified` until page-level occupancy is supplied; do not call them unrelated or merge them based on the docket conflict alone.
 
-**Concrete Failing Development Pairs (`training` & `validation` only):**
+When an authoritative page source confirms multiple decisions on the cited page, conflicting dockets support `shared_page_ambiguity`. The listed development pairs remain useful candidates for page-level verification, but their existing `shared_page_ambiguity` silver labels do not replace that missing evidence.
+
+**Concrete Development Candidates (`training` & `validation` only):**
 1. **`dev-006` `[training]`** (*McNeely v. Safe Haven* vs. *Combetta v. Ordoyne*, Louisiana Supreme Court):
    - Shared citation page with `min_page_cluster_span = 5`, `max_page_cluster_span = 5`, `shared_citations = 1`.
    - Docket: `2006-OC-1352` vs. `2006-C-1353` (`docket_numbers_conflict = 1`).
-   - Current Bug: Rule 2 preempted Rule 3 and predicted `unrelated`. Gold Label: `shared_page_ambiguity`.
+   - Current Bug: Docket conflict preempted citation review and predicted `unrelated`. Existing Gold Label: `shared_page_ambiguity`; page-occupancy evidence is still required to verify it.
 2. **`dev-012` `[validation]`** (*State v. Brown* vs. *State v. Archie*, Louisiana Supreme Court):
    - Shared citation page with `span = (4, 4)`, `shared_citations = 1`, `docket_numbers_conflict = 1`.
-   - Current Bug: Predicted `unrelated`. Gold Label: `shared_page_ambiguity`.
+   - Current Bug: Predicted `unrelated`. Existing Gold Label: `shared_page_ambiguity`; page-occupancy evidence is still required to verify it.
 3. **`dev-014` `[training]`** (*Smith v. Ferriday* vs. *State ex rel. Jeffers*, Louisiana Supreme Court):
    - Shared citation page with `span = (5, 5)`, `shared_citations = 1`, `docket_numbers_conflict = 1`.
-   - Current Bug: Predicted `unrelated`. Gold Label: `shared_page_ambiguity`.
+   - Current Bug: Predicted `unrelated`. Existing Gold Label: `shared_page_ambiguity`; page-occupancy evidence is still required to verify it.
 4. **`dev-108` `[validation]`** (*Driver v. State* vs. *Ex parte Hawthorne*, Tex. Crim. App.):
    - Shared citation page with `span = (2, 2)`, `shared_citations = 1`, `docket_numbers_conflict = 1`.
-   - Current Bug: Predicted `unrelated`. Gold Label: `shared_page_ambiguity`.
+   - Current Bug: Predicted `unrelated`. Existing Gold Label: `shared_page_ambiguity`; page-occupancy evidence is still required to verify it.
 5. **`dev-118` `[validation]`** (*United States v. Lowden* vs. *United States v. Rijos*, 1st Cir.):
    - Shared orders page with `span = (4, 4)`, `shared_citations = 2`, `docket_numbers_conflict = 1`.
-   - Current Bug: Predicted `unrelated`. Gold Label: `shared_page_ambiguity`.
+   - Current Bug: Predicted `unrelated`. Existing Gold Label: `shared_page_ambiguity`; page-occupancy evidence is still required to verify it.
 
 ### Problem B: Disambiguating `shared_page_ambiguity` from `citation_data_error`
-- **`shared_page_ambiguity`**: `shared_citations >= 1` and `max_page_span >= 2` (multiple distinct cases physically printed on the same reporter page, e.g., **543 U.S.** cert orders in **`dev-058` `[training]`**).
-- **`citation_data_error`**: `shared_citations >= 1` and `max_page_span <= 1` (a single isolated case occupies the page), yet two completely unrelated cases with conflicting dockets/courts/titles carry the identical citation due to scraper/OCR misattachment (e.g., **`dev-073` `[validation]`**).
+
+The data dictionary defines `min_page_cluster_span` / `max_page_cluster_span` as the number of reporter pages each cluster spans. This does **not** count how many distinct decisions appear on one physical page. Do not use page-span length as a proxy for page occupancy.
+
+- **`shared_page_ambiguity`**: shared citation plus page-level evidence in `distinct_decisions_on_shared_page >= 2` that multiple decisions occupy the cited page.
+- **`citation_data_error`**: shared citation plus page-level evidence in `distinct_decisions_on_shared_page == 1`, together with conflicting case metadata showing the citation was misattached.
+- **`citation_topology_unverified`**: records share a citation and have conflicting metadata, but no reliable page-level evidence distinguishes a multi-decision page from a citation attachment error. Route this to human/source review; never merge it.
 
 ---
 
@@ -68,12 +72,13 @@ In `dev_silver.jsonl`, a large group of pairs sharing a reporter page (`max_page
 
 1. **Restructure Shared Page Rule Precedence in `triage/rules.py`**:
    - Evaluate shared-citation topology (`shared_cits > 0`) **before** the generic `doc_conflict -> unrelated` fallback:
-     - When `max_page_span >= 2` and `shared_cits >= 1`:
+     - When `shared_cits >= 1`:
        - If text and case identity match (`min_hamming <= 12`, `len_ratio >= 0.65`, `same_court`, and `title_exact` or `token_jaccard >= 0.5`) $\rightarrow$ `probable_version`.
-       - Otherwise (different dockets, different captions, or different courts) $\rightarrow$ classify as **`shared_page_ambiguity`** (confidence $\ge 0.90$).
-     - When `max_page_span <= 1` and `shared_cits >= 1` but `doc_conflict` or different courts/unrelated captions (`min_hamming > 20`) $\rightarrow$ classify as **`citation_data_error`** (confidence $\ge 0.85$).
+       - If `distinct_decisions_on_shared_page >= 2`, classify as **`shared_page_ambiguity`** (confidence $\ge 0.90$).
+       - If `distinct_decisions_on_shared_page == 1` and case metadata conflicts, classify as **`citation_data_error`** (confidence $\ge 0.85$).
+       - If page-level count is unavailable, classify as **`citation_topology_unverified`** (confidence $\ge 0.90$) and route for review.
 2. **Preserve Zero False Merges on Citation Hard Negatives**:
-   - Ensure no `shared_page_ambiguity` or `citation_data_error` pair is ever assigned a merge label.
+   - Ensure no `shared_page_ambiguity`, `citation_data_error`, or `citation_topology_unverified` pair is ever assigned a merge label.
 
 ---
 
@@ -87,7 +92,7 @@ In `dev_silver.jsonl`, a large group of pairs sharing a reporter page (`max_page
    ```bash
    .venv/bin/python3 -m triage.cli bench --role 2
    ```
-   Check that `shared_page_ambiguity` Recall and F1 jump on **both** `Train` (currently `35.7%` recall) and `Val` (currently `55.6%` recall), `citation_data_error` Recall improves on `Train` and `Val`, and `Hard-Negative Citation/Page False Merges (Val)` stays `0/12`.
+   Check that no ambiguous citation pair is assigned a merge label and `Hard-Negative Citation/Page False Merges (Val)` stays `0/12`. Report `shared_page_ambiguity`, `citation_data_error`, and `citation_topology_unverified` separately; do not tune thresholds against contradictory annotations.
 3. **Run Whole-Project Generalization Check**:
    ```bash
    .venv/bin/python3 -m triage.cli bench --role all
