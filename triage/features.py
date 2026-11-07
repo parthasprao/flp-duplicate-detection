@@ -53,109 +53,212 @@ def is_stock_postconviction_or_summary(text: str) -> bool:
     return any(p in lower for p in stock_phrases)
 
 
+# A formal decree's caption block carries a heading line such as "JUDGMENT" or
+# "JUDGMENT RENDERED JUNE 30, 2016" (Texas courts of appeals use this layout).
+_JUDGMENT_HEADING = re.compile(r"^\s*JUDGMENT(?:\s+RENDERED\b[^\n]*)?\s*$", re.MULTILINE)
+_OPINION_HEADING = re.compile(r"^\s*(?:MEMORANDUM\s+)?OPINION\b[^\n]*$", re.MULTILINE)
+_HEADER_WINDOW = 800
+
+
+def normalize_docket_number(docket_str: str) -> str:
+    """Normalize a docket number string to a canonical comparable format.
+
+    - Strips procedural prefixes ('Civil Action No.', 'Civil Action', 'Case No.', 'No.', 'Appeal No.', etc.)
+    - Normalizes Unicode dashes ('—', '–') to standard hyphens ('-')
+    - Strips trailing judge initials and status tokens ('(JDB)', '(ESH)', 'Rel', 'Slip Op')
+    - Normalizes state district prefixes ('3D14-3142' -> '14-3142' -> '2014-3142')
+    - Normalizes 2-digit vs 4-digit year-sequence pairs ('08-1963' / '2008-1963', '93-200' / '1993-0200')
+    """
+    if not docket_str or not isinstance(docket_str, str):
+        return ""
+    s = docket_str.strip()
+    s = re.sub(r"[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]", "-", s)
+    s = re.sub(r"\s*\([A-Za-z0-9\s\.\-]+\)\s*$", "", s)
+    s = re.sub(r"\s+(?:rel|slip\s+op|order)\b", "", s, flags=re.IGNORECASE)
+    s = s.strip(" .,;:")
+    s = re.sub(
+        r"^(?:civil\s+action\s+no\.?|civil\s+action|case\s+no\.?|appeal\s+no\.?|docket\s+no\.?|nos?\.?)\s*",
+        "",
+        s,
+        flags=re.IGNORECASE,
+    )
+    s = re.sub(r"^(\d+)d(?=\d{2,4}-\d+)", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s*-\s*", "-", s)
+    s = re.sub(r"\bno\.?\s*", "", s, flags=re.IGNORECASE)
+
+    m = re.match(r"^(\d{1,2})-(\d{2,4})-(\d+)$", s)
+    if m:
+        dist, yr, seq = m.group(1), m.group(2), m.group(3)
+        if len(yr) == 2:
+            yr_int = int(yr)
+            yr = str(1900 + yr_int if yr_int >= 50 else 2000 + yr_int)
+        return f"{dist}-{yr}-{int(seq)}"
+
+    m = re.match(r"^(\d{2,4})-(\d+)$", s)
+    if m:
+        yr, seq = m.group(1), m.group(2)
+        if len(yr) == 2:
+            yr_int = int(yr)
+            yr = str(1900 + yr_int if yr_int >= 50 else 2000 + yr_int)
+        return f"{yr}-{int(seq)}"
+
+    return s.lower().strip()
+
+
+def extract_docket_tokens(cluster: Dict[str, Any]) -> Set[str]:
+    """Extract all normalized docket tokens and core representations from a cluster dict."""
+    tokens: Set[str] = set()
+    if not isinstance(cluster, dict):
+        return tokens
+    candidates = []
+    d = cluster.get("docket")
+    if isinstance(d, dict):
+        if d.get("docket_number"):
+            candidates.append(str(d["docket_number"]))
+        if d.get("docket_number_core"):
+            core = str(d["docket_number_core"]).strip()
+            candidates.append(core)
+            if len(core) == 8 and core.isdigit():
+                yy = int(core[:2])
+                yr = 1900 + yy if yy >= 50 else 2000 + yy
+                seq = int(core[2:])
+                tokens.add(f"{yr}-{seq}")
+    if cluster.get("docket_number"):
+        candidates.append(str(cluster["docket_number"]))
+    if cluster.get("docket_number_core"):
+        candidates.append(str(cluster["docket_number_core"]))
+
+    for cand in candidates:
+        norm = normalize_docket_number(cand)
+        if norm and any(c.isdigit() for c in norm):
+            tokens.add(norm)
+        for sub in re.split(r"[,;]+", cand):
+            sub_norm = normalize_docket_number(sub)
+            if sub_norm and any(c.isdigit() for c in sub_norm):
+                tokens.add(sub_norm)
+            for tok in sub.strip().split():
+                if any(c.isdigit() for c in tok):
+                    tok_norm = normalize_docket_number(tok)
+                    if tok_norm and any(c.isdigit() for c in tok_norm):
+                        tokens.add(tok_norm)
+    return tokens
+
+
+def get_reporter_family(cit_key: str) -> str:
+    """Extract canonical reporter family from citation key (e.g. '915|F2D|469' -> 'F')."""
+    if not cit_key:
+        return ""
+    parts = cit_key.split("|")
+    rep = parts[1].upper() if len(parts) >= 2 else cit_key.upper()
+    return re.sub(r"(?:2D|3D|4TH|5TH|NS)$", "", rep).strip()
+
+
+def _nonnegative_int(value: Any) -> int:
+    try:
+        parsed = int(value)
+        return parsed if parsed >= 0 else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _optional_nonnegative_int(value: Any) -> Optional[int]:
+    try:
+        parsed = int(value)
+        return parsed if parsed >= 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _citation_reporter(cit: Dict[str, Any]) -> str:
+    reporter = cit.get("reporter")
+    if reporter:
+        return str(reporter).strip()
+    key = str(cit.get("citation_key") or "")
+    parts = key.split("|")
+    if len(parts) >= 2:
+        return parts[1].strip()
+    return ""
+
+
+def _citation_key(cit: Dict[str, Any]) -> str:
+    key = cit.get("citation_key")
+    if key:
+        return re.sub(r"[^a-z0-9]+", "", str(key).lower())
+    vol = cit.get("volume")
+    rep = cit.get("reporter")
+    page = cit.get("page")
+    if vol and rep and page:
+        return re.sub(r"[^a-z0-9]+", "", f"{vol}{rep}{page}".lower())
+    return ""
+
+
+def _instrument_type(text: str) -> str:
+    """Classify an excerpt's header as 'judgment', 'opinion' or '' (unknown)."""
+    head = (text or "")[:_HEADER_WINDOW]
+    if not head.strip():
+        return ""
+    if _JUDGMENT_HEADING.search(head):
+        return "judgment"
+    if _OPINION_HEADING.search(head):
+        return "opinion"
+    return "other"
+
+
 def detect_judgment_vs_opinion(
     low: Any,
     high: Any,
     exc_low: str = "",
     exc_high: str = "",
 ) -> Tuple[bool, str]:
-    """Detect if one cluster represents a judgment/order and the other an opinion."""
+    """Detect a companion-instrument pair: one record is the formal judgment, the other the opinion."""
     if isinstance(low, str) and isinstance(high, str):
-        all_text = f"{low.lower()} {high.lower()}"
+        text_low, text_high = low, high
     else:
-        low_d = low if isinstance(low, dict) else {}
-        high_d = high if isinstance(high, dict) else {}
-        parts = [
-            (low_d.get("case_name") or "").lower(),
-            (high_d.get("case_name") or "").lower(),
-            (low_d.get("case_name_full") or "").lower(),
-            (high_d.get("case_name_full") or "").lower(),
-            (exc_low or "")[:200].lower(),
-            (exc_high or "")[:200].lower(),
-        ]
-        all_text = " ".join(parts)
-    has_judgment = "judgment" in all_text or "order" in all_text
-    has_opinion = "opinion" in all_text or "memorandum" in all_text
-    if has_judgment and has_opinion:
-        return True, "One record appears to be a separate judgment/order while the other is an explanatory opinion"
+        text_low, text_high = exc_low or "", exc_high or ""
+
+    kind_low = _instrument_type(text_low)
+    kind_high = _instrument_type(text_high)
+    if not kind_low or not kind_high:
+        return False, ""
+    if (kind_low == "judgment") != (kind_high == "judgment"):
+        return True, (
+            "One record is the court's separate formal judgment and the other is the "
+            "explanatory opinion (companion instruments issued together, not one document twice)"
+        )
     return False, ""
 
 
-def _citation_parts(citation: Any) -> Tuple[str, str, str]:
-    """Return normalized volume, reporter, and page components when available."""
-    if isinstance(citation, dict):
-        volume = str(citation.get("volume") or "").strip()
-        reporter = str(citation.get("reporter") or "").strip()
-        page = str(citation.get("page") or "").strip()
-        if volume and reporter and page:
-            return volume, reporter, page
-        citation = citation.get("citation_key") or ""
-
-    value = str(citation or "").strip()
-    if not value:
-        return "", "", ""
-
-    # CourtListener keys use volume|reporter|page, while human-readable
-    # citations use forms such as "149 A.D.3d 416".
-    if "|" in value:
-        parts = [part.strip() for part in value.split("|", 2)]
-        if len(parts) == 3 and all(parts):
-            return parts[0], parts[1], parts[2]
-
-    match = re.match(r"^\s*(\d+)\s+(.+?)\s+(\d+[A-Za-z]?)\s*$", value)
-    if match:
-        return match.group(1), match.group(2), match.group(3)
-    return "", "", ""
+# Procedural role designations that appear in full captions.
+_ROLE_WORDS = re.compile(
+    r"\b(movant|appellant|appellee|petitioner|respondent|intervenor|cross)\b", re.IGNORECASE
+)
 
 
-def _normalize_citation(citation: Any) -> str:
-    """Normalize citation strings so punctuation/spacing variants still match."""
-    volume, reporter, page = _citation_parts(citation)
-    if volume and reporter and page:
-        normalized_reporter = re.sub(r"[^a-z0-9]", "", reporter.lower())
-        normalized_page = re.sub(r"\s+", "", page.lower())
-        return f"{volume.lower()}|{normalized_reporter}|{normalized_page}"
-
-    if isinstance(citation, dict):
-        citation = citation.get("citation_key") or ""
-    return re.sub(r"[^a-z0-9]+", " ", str(citation or "").lower()).strip()
-
-
-def _citation_reporter(citation: Any) -> str:
-    """Extract a normalized reporter name from a citation when it is parseable."""
-    _, reporter, _ = _citation_parts(citation)
-    return re.sub(r"[^a-z0-9]", "", reporter.lower()) if reporter else ""
-
-
-def _citations_for_cluster(cluster: Dict[str, Any], feature_value: Any) -> List[Any]:
-    """Read citations from either enriched features or the cluster record."""
-    if isinstance(feature_value, list):
-        return feature_value
-    citations = cluster.get("citations", [])
-    return citations if isinstance(citations, list) else []
-
-
-def _nonnegative_int(value: Any) -> int:
-    """Coerce an optional page-span value without failing on null/string data."""
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError, OverflowError):
-        return 0
-    return max(0, parsed)
-
-
-def _optional_nonnegative_int(value: Any) -> Optional[int]:
-    """Keep missing page-occupancy evidence distinct from a known value."""
-    if value is None or value == "":
-        return None
-    return _nonnegative_int(value)
+def detect_caption_role_conflict(low: Dict[str, Any], high: Dict[str, Any]) -> Tuple[bool, str]:
+    """Same parties, but the full captions assign a procedural role to a different party."""
+    low_d = low or {}
+    high_d = high or {}
+    full_low = (low_d.get("case_name_full") or "").strip()
+    full_high = (high_d.get("case_name_full") or "").strip()
+    if not full_low or not full_high:
+        return False, ""
+    if not (_ROLE_WORDS.search(full_low) and _ROLE_WORDS.search(full_high)):
+        return False, ""
+    toks_low = _tokenize(full_low)
+    toks_high = _tokenize(full_high)
+    if toks_low == toks_high or sorted(toks_low) != sorted(toks_high):
+        return False, ""
+    return True, (
+        "Full captions name the same parties but assign the procedural role "
+        "(movant/appellant/petitioner) to a different party: separate motions or appeals"
+    )
 
 
 def extract_enriched_features(row: Dict[str, Any]) -> Dict[str, Any]:
     """Extract and derive all operational features for a pair."""
-    feat = row.get("features", {}) or {}
-    low = row.get("cluster_low", {}) or {}
-    high = row.get("cluster_high", {}) or {}
+    feat = row.get("features") or {}
+    low = row.get("cluster_low") or {}
+    high = row.get("cluster_high") or {}
     exc_low = row.get("excerpt_low", "") or ""
     exc_high = row.get("excerpt_high", "") or ""
 
@@ -168,16 +271,14 @@ def extract_enriched_features(row: Dict[str, Any]) -> Dict[str, Any]:
     parent_link = bool(feat.get("court_parent_link"))
     same_year = bool(feat.get("same_filing_year"))
     delta_days = feat.get("filing_date_delta_days")
-    low_citations = _citations_for_cluster(low, feat.get("citations_low"))
-    high_citations = _citations_for_cluster(high, feat.get("citations_high"))
-    low_citation_keys = {_normalize_citation(c) for c in low_citations}
-    high_citation_keys = {_normalize_citation(c) for c in high_citations}
-    low_citation_keys.discard("")
-    high_citation_keys.discard("")
+
+    # Citations extraction & normalization
+    low_citations = [c for c in (low.get("citations") or []) if isinstance(c, dict)]
+    high_citations = [c for c in (high.get("citations") or []) if isinstance(c, dict)]
+    low_citation_keys = {_citation_key(c) for c in low_citations} - {""}
+    high_citation_keys = {_citation_key(c) for c in high_citations} - {""}
     shared_citation_keys = low_citation_keys & high_citation_keys
     feature_shared_cits = _nonnegative_int(feat.get("shared_citations"))
-    # Prefer the observed citation lists when a precomputed count is absent or
-    # stale, while retaining a larger supplied count when only keys are partial.
     shared_cits = max(feature_shared_cits, len(shared_citation_keys))
 
     span_min = _nonnegative_int(feat.get("min_page_cluster_span"))
@@ -186,8 +287,10 @@ def extract_enriched_features(row: Dict[str, Any]) -> Dict[str, Any]:
     distinct_decisions_on_shared_page = _optional_nonnegative_int(
         feat.get("distinct_decisions_on_shared_page")
     )
+
     shared_sha1 = bool(feat.get("shared_sha1"))
     shared_text_sha = bool(feat.get("shared_text_sha256"))
+
     low_reporters = {
         reporter for reporter in (_citation_reporter(c) for c in low_citations) if reporter
     }
@@ -197,12 +300,29 @@ def extract_enriched_features(row: Dict[str, Any]) -> Dict[str, Any]:
     disjoint_rep = bool(feat.get("disjoint_reporters")) or bool(
         low_reporters and high_reporters and low_reporters.isdisjoint(high_reporters)
     )
+
     if "title_exact" in feat or "title_sorted_exact" in feat:
         title_exact = bool(feat.get("title_exact") or feat.get("title_sorted_exact"))
     else:
         low_title = re.sub(r"\s+", " ", str(low.get("case_name") or "").lower()).strip()
         high_title = re.sub(r"\s+", " ", str(high.get("case_name") or "").lower()).strip()
         title_exact = bool(low_title and high_title and low_title == high_title)
+
+    # Normalized core docket matching
+    tokens_low = extract_docket_tokens(low)
+    tokens_high = extract_docket_tokens(high)
+    if tokens_low and tokens_high and (tokens_low & tokens_high):
+        same_doc_num = True
+        doc_conflict = False
+
+    # True disjoint reporters verification
+    if disjoint_rep and shared_cits == 0:
+        cits_l = [c.get("citation_key") or "" for c in low_citations]
+        cits_h = [c.get("citation_key") or "" for c in high_citations]
+        reps_l = {get_reporter_family(c) for c in cits_l if c}
+        reps_h = {get_reporter_family(c) for c in cits_h if c}
+        if reps_l and reps_h and (reps_l & reps_h):
+            disjoint_rep = False
 
     # Excerpt similarity
     has_both_excerpts = bool(exc_low and exc_high)
@@ -215,9 +335,9 @@ def extract_enriched_features(row: Dict[str, Any]) -> Dict[str, Any]:
 
     # Judgment vs opinion
     is_j_vs_op, j_vs_op_reason = detect_judgment_vs_opinion(low, high, exc_low, exc_high)
+    role_conflict, role_conflict_reason = detect_caption_role_conflict(low, high)
 
-    # Retained as a model feature for the documented CourtListener court-code
-    # ingestion defect; the rule classifier itself relies on page topology.
+    # SCOTUS cert denial bug (CourtListener data quality defect)
     court_low = str(low.get("court_id") or "").lower()
     court_high = str(high.get("court_id") or "").lower()
     is_scotus_cafc_cert_bug = (
@@ -250,5 +370,7 @@ def extract_enriched_features(row: Dict[str, Any]) -> Dict[str, Any]:
         "is_stock": low_is_stock or high_is_stock,
         "is_j_vs_op": is_j_vs_op,
         "j_vs_op_reason": j_vs_op_reason,
+        "role_conflict": role_conflict,
+        "role_conflict_reason": role_conflict_reason,
         "is_scotus_cafc_cert_bug": is_scotus_cafc_cert_bug,
     }

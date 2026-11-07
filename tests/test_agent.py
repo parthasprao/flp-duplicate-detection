@@ -55,7 +55,7 @@ def _make_pair(
             "cluster_id": 102,
             "case_name": "Acme Corp v. Beta Inc",
             "court_id": "ca9",
-            "docket": {"docket_number": "21-1234"},
+            "docket": {"docket_number": "21-1234" if same_doc else "21-9999"},
             "date_filed": "2021-01-01",
         },
         "excerpt_low": "Affirmed. Opinion of the court.",
