@@ -10,10 +10,16 @@ from __future__ import annotations
 
 import difflib
 import json
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# Ensure repository root is on sys.path for robust execution across all launch methods
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import pandas as pd
 import streamlit as st
