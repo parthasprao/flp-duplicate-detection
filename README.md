@@ -91,7 +91,34 @@ python -m triage.cli evaluate outputs/candidates_preds.jsonl \
     --split validation
 ```
 
-### 4. Launch the Streamlit Maintainer Workbench
+### 4. Tier 2 Agent Configuration (OpenRouter Cost Optimization)
+
+Tier 2 uses a cost-optimized, tiered routing architecture via OpenRouter:
+- **Fast / Repetitive Inference:** `z-ai/glm-5.3-flash` (handles standard candidate duplicate/version checks).
+- **Deep Reasoning & Fallback:** `nvidia/nemotron-4-340b-instruct` (handles complex cases: multi-decision reporter page spans, docket conflicts, cert denial volume anomalies, or low-confidence returns).
+- **Safety Fallback:** If the API key is not present or an API call fails, the pipeline seamlessly falls back to the deterministic offline analyzer.
+
+#### Setting Your OpenRouter API Key
+Export the API key in your terminal or add it to a local `.env` file (git-ignored):
+```bash
+export OPENROUTER_API_KEY="sk-or-v1-xxxxxxxxxxxxxxxxxxxxxxxx"
+```
+
+Optional model customization via environment variables:
+```bash
+export OPENROUTER_MODEL_FAST="z-ai/glm-5.3-flash"
+export OPENROUTER_MODEL_COMPLEX="nvidia/nemotron-4-340b-instruct"
+```
+
+Run classification with OpenRouter tiered adjudication enabled:
+```bash
+python -m triage.cli classify \
+    nyu-law-hackathon-2026-duplicates/student-packages/duplicates/data/candidates.jsonl \
+    --out outputs/candidates_preds.jsonl \
+    --agent openrouter
+```
+
+### 5. Launch the Streamlit Maintainer Workbench
 
 ```bash
 streamlit run app/streamlit_app.py
