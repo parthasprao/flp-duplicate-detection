@@ -1,0 +1,521 @@
+/* Dark mode override for the legal-record comparison workbench.
+   Loaded after workbench.css; typography and layout remain unchanged. */
+:root {
+  --neon-dark-theme: 1;
+  color-scheme: dark;
+  --review-paper: #171d20;
+  --review-card: #20292d;
+  --review-ink: #edf3ef;
+  --review-muted: #b0beb9;
+  --review-rule: #3d4a4d;
+  --review-accent: #b7ef63;
+
+  --review-raised: #263237;
+  --review-inset: #13191c;
+  --review-hover: #303d40;
+  --review-focus: #76d9e8;
+  --review-lime: #b7ef63;
+  --review-cyan: #76d9e8;
+  --review-placeholder: #8f9d99;
+  --review-disabled: #7c8985;
+}
+
+.stApp,
+[data-testid="stAppViewContainer"],
+[data-testid="stMain"],
+[data-testid="stMainBlockContainer"] {
+  background: var(--review-paper);
+  color: var(--review-ink);
+}
+
+[data-testid="stHeader"],
+[data-testid="stToolbar"],
+[data-testid="stDecoration"] {
+  background: var(--review-paper);
+}
+
+[data-testid="stSidebar"],
+[data-testid="stSidebar"][data-collapsed="false"] {
+  background: #1c2629;
+  border-right-color: #354448;
+  color: var(--review-ink);
+}
+
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3,
+[data-testid="stSidebar"] h4,
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
+[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {
+  color: var(--review-ink);
+}
+
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3,
+.review-brand span {
+  color: var(--review-lime);
+}
+
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p,
+[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p,
+[data-testid="stCaptionContainer"] p,
+[data-testid="stWidgetLabel"] p,
+.review-eyebrow,
+.record-field-label {
+  color: var(--review-muted);
+}
+
+/* Dark-mode title contrast; DM Serif Display typography is inherited. */
+.stApp h1,
+.stApp h1 span {
+  color: #f1f5f0;
+}
+
+.review-brand {
+  border-bottom-color: var(--review-rule);
+  color: var(--review-ink);
+}
+
+[data-testid="stVerticalBlockBorderWrapper"] > div,
+.st-key-record_A,
+.st-key-record_B,
+.st-key-comparison_signals,
+.st-key-review_form,
+[data-testid="stExpander"] {
+  background: var(--review-card);
+  border-color: var(--review-rule);
+  color: var(--review-ink);
+}
+
+/* Record A/B colors identify the source record only, not a match or verdict. */
+.st-key-record_A {
+  --record-accent: var(--review-lime);
+  background: #263128;
+  border-top-color: var(--review-lime) !important;
+}
+
+.st-key-record_B {
+  --record-accent: var(--review-cyan);
+  background: #203034;
+  border-top-color: var(--review-cyan) !important;
+}
+
+.st-key-record_A h3,
+.st-key-record_B h3 {
+  background: var(--record-accent);
+  color: #17201d;
+}
+
+.st-key-record_A .record-field,
+.st-key-record_B .record-field {
+  background: #192225;
+  border-color: #40504f;
+}
+
+.st-key-record_A .record-field-label,
+.st-key-record_A .record-field-value {
+  color: #d8efbb;
+}
+
+.st-key-record_B .record-field-label,
+.st-key-record_B .record-field-value {
+  color: #c4edf0;
+}
+
+.st-key-record_A .record-name,
+.st-key-record_B .record-name,
+.st-key-record_A .record-field-value,
+.st-key-record_B .record-field-value,
+.record-name,
+.record-field-value {
+  color: var(--review-ink);
+}
+
+.st-key-comparison_signals [data-testid="stColumn"] {
+  background: var(--review-raised);
+  border-color: var(--review-rule);
+  color: var(--review-ink);
+}
+
+.st-key-comparison_signals [data-testid="stMarkdownContainer"] strong {
+  color: #c1cec8;
+}
+
+/* Sidebar choices and native radio controls remain visible and operable. */
+[data-testid="stSidebar"] [data-testid="stRadioOption"] {
+  color: var(--review-ink);
+  border-color: transparent;
+}
+
+[data-testid="stSidebar"] [data-testid="stRadioOption"]:hover {
+  background: var(--review-hover);
+  border-color: #526466;
+}
+
+[data-testid="stSidebar"] [data-testid="stRadioOption"]:has(input:checked) {
+  background: #2b3938;
+  border-color: #617957;
+  box-shadow: inset 3px 0 var(--review-lime);
+}
+
+[data-testid="stRadioOption"] label,
+[data-testid="stRadioOption"] p,
+[data-testid="stRadio"] label,
+[data-testid="stCheckbox"] label {
+  color: var(--review-ink);
+}
+
+[data-testid="stRadioOption"] input,
+[data-testid="stRadio"] input,
+[data-testid="stCheckbox"] input {
+  accent-color: var(--review-lime);
+}
+
+/* Inputs: cover actual Streamlit widget test IDs and their BaseWeb controls. */
+[data-testid="stTextInput"] [data-baseweb="input"],
+[data-testid="stTextArea"] [data-baseweb="textarea"],
+[data-testid="stSelectbox"] [data-baseweb="select"] > div,
+[data-testid="stSidebar"] [data-baseweb="input"],
+[data-testid="stSidebar"] [data-baseweb="select"] > div,
+[data-baseweb="input"],
+[data-baseweb="textarea"],
+[data-baseweb="select"] > div {
+  background: var(--review-inset);
+  color: var(--review-ink);
+  border-color: #536164;
+}
+
+[data-testid="stTextInput"] input,
+[data-testid="stTextArea"] textarea,
+[data-testid="stSelectbox"] input,
+[data-baseweb="input"] input,
+[data-baseweb="textarea"] textarea,
+[data-baseweb="select"] input {
+  background: transparent;
+  color: var(--review-ink);
+  caret-color: var(--review-lime);
+}
+
+[data-testid="stTextInput"] input::placeholder,
+[data-testid="stTextArea"] textarea::placeholder,
+[data-baseweb="input"] input::placeholder,
+[data-baseweb="textarea"] textarea::placeholder {
+  color: var(--review-placeholder);
+  opacity: 1;
+}
+
+[data-testid="stSelectbox"] [data-baseweb="select"] *,
+[data-baseweb="select"] *,
+[data-baseweb="input"] *,
+[data-baseweb="textarea"] * {
+  color: var(--review-ink);
+}
+
+[data-testid="stTextInput"] [data-baseweb="input"]:focus-within,
+[data-testid="stTextArea"] [data-baseweb="textarea"]:focus-within,
+[data-testid="stSelectbox"] [data-baseweb="select"] > div:focus-within,
+[data-baseweb="input"]:focus-within,
+[data-baseweb="textarea"]:focus-within,
+[data-baseweb="select"] > div:focus-within {
+  border-color: var(--review-focus);
+  box-shadow: 0 0 0 1px var(--review-focus);
+}
+
+input:focus-visible,
+textarea:focus-visible,
+button:focus-visible,
+[data-testid="stRadioOption"]:has(input:focus-visible) {
+  outline: 2px solid var(--review-focus) !important;
+  outline-offset: 2px;
+}
+
+input:disabled,
+textarea:disabled,
+select:disabled,
+[aria-disabled="true"] {
+  color: var(--review-disabled);
+  -webkit-text-fill-color: var(--review-disabled);
+  opacity: .78;
+}
+
+/* BaseWeb select menus may render in a body-level portal, outside .stApp. */
+[data-baseweb="popover"],
+[data-baseweb="menu"],
+[role="listbox"],
+[role="option"],
+ul[data-testid="stSelectboxVirtualDropdown"] {
+  background: #20292d;
+  color: var(--review-ink);
+  border-color: var(--review-rule);
+}
+
+[data-baseweb="popover"] *,
+[data-baseweb="menu"] *,
+[role="listbox"] *,
+[role="option"] *,
+ul[data-testid="stSelectboxVirtualDropdown"] * {
+  color: var(--review-ink);
+}
+
+[role="option"]:hover,
+[role="option"][aria-selected="true"],
+[data-baseweb="menu"] li:hover {
+  background: var(--review-hover);
+}
+
+/* Buttons preserve primary/secondary distinctions and disabled affordances. */
+[data-testid="stBaseButton-secondary"],
+[data-testid="stBaseButton-secondaryFormSubmit"],
+[data-testid="stDownloadButton"] button,
+[data-testid="stLinkButton"] a {
+  background: #273337;
+  border-color: #536164;
+  color: var(--review-ink);
+}
+
+[data-testid="stBaseButton-primary"] {
+  background: #354a36;
+  border-color: var(--review-lime);
+  color: #e8f7dc;
+}
+
+[data-testid="stBaseButton-primary"]:hover:not(:disabled) {
+  background: #435d3f;
+  border-color: var(--review-lime) !important;
+  color: #f5ffeb;
+}
+
+[data-testid="stBaseButton-secondary"]:hover:not(:disabled),
+[data-testid="stBaseButton-secondaryFormSubmit"]:hover:not(:disabled),
+[data-testid="stDownloadButton"] button:hover:not(:disabled),
+[data-testid="stLinkButton"] a:hover:not(:disabled) {
+  background: var(--review-hover);
+  border-color: var(--review-cyan) !important;
+  color: #f2fbf8;
+}
+
+[data-testid="stSidebar"] [data-testid="stDownloadButton"] button {
+  background: #202c2f;
+  border-color: #718c70;
+  color: #d9edc5;
+}
+
+[data-testid="stSidebar"] [data-testid="stDownloadButton"] button:hover:not(:disabled) {
+  background: #364b3b;
+  border-color: var(--review-lime) !important;
+  color: #f4ffe9;
+}
+
+button:disabled,
+[data-testid="stDownloadButton"] button:disabled,
+[data-testid="stBaseButton-primary"]:disabled,
+[data-testid="stBaseButton-secondary"]:disabled {
+  background: #252d30;
+  border-color: #3d494c;
+  color: var(--review-disabled);
+  opacity: .72;
+}
+
+/* Expanders, alerts, progress and separators. */
+[data-testid="stExpander"] {
+  background: var(--review-card);
+  border-color: var(--review-rule);
+}
+
+[data-testid="stExpander"] summary,
+[data-testid="stExpander"] summary p,
+[data-testid="stExpander"] [data-testid="stMarkdownContainer"] {
+  color: var(--review-ink);
+}
+
+[data-testid="stExpander"] summary:hover {
+  background: var(--review-hover);
+}
+
+[data-testid="stAlert"] {
+  background: #263236;
+  border-color: #526367;
+  color: var(--review-ink);
+}
+
+[data-testid="stAlert"] p,
+[data-testid="stAlert"] [data-testid="stMarkdownContainer"],
+[data-testid="stAlert"] [data-testid="stMarkdownContainer"] * {
+  color: var(--review-ink);
+}
+
+[data-testid="stAlert"][kind="info"],
+[data-testid="stAlert"][data-baseweb="notification"][kind="info"] {
+  background: #203438;
+  border-color: #4e8790;
+}
+
+[data-testid="stAlert"][kind="warning"],
+[data-testid="stAlert"][data-baseweb="notification"][kind="warning"] {
+  background: #383426;
+  border-color: #9c8854;
+}
+
+[data-testid="stAlert"][kind="success"],
+[data-testid="stAlert"][data-baseweb="notification"][kind="success"] {
+  background: #29382a;
+  border-color: #688a54;
+}
+
+[data-testid="stAlert"][kind="error"],
+[data-testid="stAlert"][data-baseweb="notification"][kind="error"] {
+  background: #3a2b2b;
+  border-color: #a86767;
+}
+
+[data-testid="stProgressBar"] > div {
+  background: #354144;
+}
+
+[data-testid="stProgressBar"] > div > div {
+  background: var(--review-lime);
+}
+
+[data-testid="stSidebar"] hr,
+hr {
+  border-color: var(--review-rule);
+}
+
+/* Metrics, code/diff, JSON and tabular evidence. */
+[data-testid="stMetric"],
+[data-testid="stMetricLabel"],
+[data-testid="stMetricValue"],
+[data-testid="stMetricDelta"] {
+  color: var(--review-ink);
+}
+
+[data-testid="stMetricLabel"] *,
+[data-testid="stMetricDelta"] {
+  color: var(--review-muted);
+}
+
+[data-testid="stMetricValue"] {
+  color: #e6f1ea;
+}
+
+[data-testid="stCode"],
+[data-testid="stCodeBlock"],
+pre,
+code {
+  background: #141b1e;
+  color: #dce9e2;
+  border-color: #3b494c;
+}
+
+[data-testid="stJson"],
+[data-testid="stJson"] pre {
+  background: #141b1e;
+  color: #dce9e2;
+}
+
+[data-testid="stDataFrame"],
+[data-testid="stTable"],
+[data-testid="stDataFrame"] [role="grid"],
+[data-testid="stDataFrame"] [role="columnheader"],
+[data-testid="stDataFrame"] [role="gridcell"],
+table,
+thead,
+tbody,
+tr,
+th,
+td {
+  color: var(--review-ink);
+  border-color: var(--review-rule);
+}
+
+[data-testid="stDataFrame"] [role="columnheader"],
+th {
+  background: #2a3639;
+}
+
+[data-testid="stDataFrame"] [role="gridcell"],
+td {
+  background: #20292d;
+}
+
+[data-testid="stDataFrame"] [role="gridcell"]:hover,
+td:hover {
+  background: #2a373a;
+}
+
+/* Keep Streamlit text/icons readable without changing the established typeface. */
+.stApp [data-testid="stMarkdownContainer"],
+.stApp [data-testid="stMarkdownContainer"] p,
+.stApp [data-testid="stMarkdownContainer"] li,
+.stApp [data-testid="stMarkdownContainer"] strong,
+.stApp [data-testid="stMarkdownContainer"] em,
+.stApp [data-testid="stWidgetLabel"],
+.stApp [data-testid="stWidgetLabel"] p,
+.stApp [data-testid="stCaptionContainer"],
+.stApp [data-testid="stCaptionContainer"] p,
+.stApp [data-testid="stWrite"],
+.stApp label,
+.stApp [data-testid="stIconMaterial"] {
+  color: var(--review-ink);
+}
+
+.stApp [data-testid="stCaptionContainer"] p,
+.stApp [data-testid="stWidgetLabel"] p {
+  color: var(--review-muted);
+}
+
+/* Streamlit 1.67 uses React Aria rather than BaseWeb for these controls. */
+.stApp [data-testid="stSelectbox"] [role="group"],
+.stApp [data-testid="stTextInputRootElement"],
+.stApp [data-testid="stTextAreaRootElement"],
+.stApp [data-testid="stTextArea"] textarea,
+.stApp [data-testid="stExpander"] details,
+.stApp [data-testid="stExpander"] summary {
+  background: var(--review-inset) !important;
+  color: var(--review-ink) !important;
+  border-color: var(--review-rule) !important;
+}
+.stApp [data-testid="stSelectbox"] input,
+.stApp [data-testid="stSelectbox"] button,
+.stApp [data-testid="stTextInput"] input,
+.stApp [data-testid="stTextArea"] textarea {
+  background: transparent !important;
+  color: var(--review-ink) !important;
+  -webkit-text-fill-color: var(--review-ink);
+  caret-color: var(--review-cyan);
+}
+.stApp input::placeholder, .stApp textarea::placeholder {
+  color: var(--review-placeholder) !important;
+  -webkit-text-fill-color: var(--review-placeholder);
+}
+.stApp input:disabled, .stApp textarea:disabled {
+  color: var(--review-disabled) !important;
+  -webkit-text-fill-color: var(--review-disabled);
+}
+.stApp [data-testid="stSelectbox"] [role="group"]:focus-within,
+.stApp [data-testid="stTextInputRootElement"]:focus-within {
+  outline: 2px solid var(--review-cyan);
+  outline-offset: 1px;
+}
+.stApp [data-testid="stAlertContainer"] {
+  background: #20343b !important;
+  color: #e4f6fa;
+  border: 1px solid #4e8790;
+}
+.stApp [data-testid="stAlertContainer"]:has([data-testid="stAlertContentWarning"]) {
+  background: #383426 !important;
+  border-color: #9c8854;
+}
+.stApp [data-testid="stAlertContainer"]:has([data-testid="stAlertContentSuccess"]) {
+  background: #29382a !important;
+  border-color: #688a54;
+}
+.stApp [data-testid="stAlertContainer"]:has([data-testid="stAlertContentError"]) {
+  background: #3a2b2b !important;
+  border-color: #a86767;
+}
+.stApp [data-testid="stAlertContainer"] [data-testid^="stAlertContent"] {
+  background: transparent !important;
+}

@@ -5,6 +5,7 @@ from __future__ import annotations
 import difflib
 import json
 import sys
+from html import escape
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -152,7 +153,10 @@ def record_decision(pair: dict, label: str, mode: str, demo: bool) -> None:
 
 def render_record(record: dict, side: str, explicit_url: str | None, demo: bool) -> None:
     st.subheader(f"Record {side}")
-    st.write(display(record.get("case_name")))
+    st.markdown(
+        f'<div class="record-name">{escape(display(record.get("case_name")))}</div>',
+        unsafe_allow_html=True,
+    )
     docket = record.get("docket") or {}
     court = record.get("court") or {}
     citations = record.get("citations") or []
@@ -165,8 +169,13 @@ def render_record(record: dict, side: str, explicit_url: str | None, demo: bool)
             str(c.get("citation_key") or "") for c in citations if isinstance(c, dict)
         ) or None,
     }
-    for title, value in values.items():
-        st.write(f"**{title}:** {display(value)}")
+    fields = "".join(
+        '<div class="record-field">'
+        f'<span class="record-field-label">{escape(title)}</span>'
+        f'<span class="record-field-value">{escape(display(value))}</span></div>'
+        for title, value in values.items()
+    )
+    st.markdown(f'<div class="record-fields">{fields}</div>', unsafe_allow_html=True)
     if record.get("case_name_full"):
         st.caption(record["case_name_full"])
     link = courtlistener_url(record, explicit_url) if not demo else None
@@ -195,9 +204,10 @@ def render_evidence(pair: dict) -> None:
 
 def render_comparison(pair: dict, demo: bool) -> None:
     st.header("Case comparison")
+    st.caption("Two records, side by side. Colors identify A and B only—not a match or a verdict.")
     low, high = pair.get("cluster_low") or {}, pair.get("cluster_high") or {}
-    for column, record, side in zip(st.columns(2), [low, high], ["A", "B"]):
-        with column:
+    for column, record, side in zip(st.columns(2, gap="medium"), [low, high], ["A", "B"]):
+        with column.container(border=True, key=f"record_{side}"):
             render_record(record, side, pair.get(
                 "courtlistener_url_low" if side == "A" else "courtlistener_url_high"
             ), demo)
@@ -217,10 +227,12 @@ def render_comparison(pair: dict, demo: bool) -> None:
         "Text length ratio": display(features.get("text_length_ratio")),
     }
     items = list(signals.items())
-    for offset in range(0, len(items), 3):
-        for column, (title, value) in zip(st.columns(3), items[offset:offset + 3]):
-            column.markdown(f"**{title}**")
-            column.write(value)
+    st.caption("02 / COMPARISON SIGNALS")
+    with st.container(border=True, key="comparison_signals"):
+        for offset in range(0, len(items), 3):
+            for column, (title, value) in zip(st.columns(3), items[offset:offset + 3]):
+                column.markdown(f"**{title}**")
+                column.write(value)
     st.caption("Signals are supplied by the data/pipeline; missing values are not mismatches.")
     court_a, court_b = low.get("court_id"), high.get("court_id")
     supplied_same_court = yes_no(features.get("same_court"))
@@ -234,7 +246,7 @@ def render_comparison(pair: dict, demo: bool) -> None:
             "prediction; check the source before relying on this evidence."
         )
     excerpts = [pair.get("excerpt_low") or "", pair.get("excerpt_high") or ""]
-    with st.expander("Text excerpts and differences", expanded=True):
+    with st.expander("Text excerpts and differences", expanded=False):
         for column, side, text in zip(st.columns(2), ["A", "B"], excerpts):
             with column:
                 st.text_area(f"Record {side} excerpt", text or "No text excerpt available",
@@ -264,42 +276,65 @@ def render_decisions(pair: dict, mode: str, demo: bool) -> None:
     }.items():
         if key not in st.session_state:
             st.session_state[key] = value
-    st.text_area("Review notes", key=f"notes_{pid}", height=80)
-    st.text_input("Evidence cited (source link or passage)", key=f"evidence_{pid}")
-    st.caption("Use a decision button below to save these fields with your review.")
-    low = (pair.get("cluster_low") or {}).get("cluster_id")
-    high = (pair.get("cluster_high") or {}).get("cluster_id")
-    valid_ids = low is not None and high is not None and low != high
-    if valid_ids:
-        if f"keep_{pid}" not in st.session_state:
-            saved_keep = (existing or {}).get("keep_cluster_id", low)
-            st.session_state[f"keep_{pid}"] = saved_keep if saved_keep in (low, high) else low
-        st.radio("Proposed surviving cluster (for duplicate/version proposals only)",
-                 [low, high], format_func=lambda cid: f"Cluster {cid}",
-                 horizontal=True, key=f"keep_{pid}")
-    separate_labels = sorted(VALID_LABELS - MERGE_LABELS - {LABEL_INSUFFICIENT})
-    if f"separate_{pid}" not in st.session_state:
-        saved_label = (existing or {}).get("decision")
-        st.session_state[f"separate_{pid}"] = (
-            saved_label if saved_label in separate_labels else LABEL_RELATED_DECISION
-        )
-    separate = st.selectbox("Keep-separate category", separate_labels,
-                           format_func=LABEL_NAMES.get, key=f"separate_{pid}")
-    actions = [
-        ("Confirm Duplicate", LABEL_PROBABLE_DUPLICATE),
-        ("Mark as Version", LABEL_PROBABLE_VERSION),
-        ("Keep Separate", separate),
-        ("Defer", LABEL_INSUFFICIENT),
-    ]
-    for column, (title, label) in zip(st.columns(4), actions):
-        column.button(title, key=f"decision_{pid}_{label}", use_container_width=True,
-                      disabled=label in MERGE_LABELS and not valid_ids,
-                      on_click=record_decision, args=(pair, label, mode, demo))
+    with st.container(border=True, key="review_form"):
+        notes_col, evidence_col = st.columns(2, gap="medium")
+        with notes_col:
+            st.text_area("Review notes", key=f"notes_{pid}", height=80)
+        with evidence_col:
+            st.text_input("Evidence cited (source link or passage)", key=f"evidence_{pid}")
+        st.caption("Use a decision button below to save these fields with your review.")
+        low = (pair.get("cluster_low") or {}).get("cluster_id")
+        high = (pair.get("cluster_high") or {}).get("cluster_id")
+        valid_ids = low is not None and high is not None and low != high
+        keep_col, separate_col = st.columns(2, gap="medium")
+        if valid_ids:
+            if f"keep_{pid}" not in st.session_state:
+                saved_keep = (existing or {}).get("keep_cluster_id", low)
+                st.session_state[f"keep_{pid}"] = saved_keep if saved_keep in (low, high) else low
+            keep_col.radio("Proposed surviving cluster (for duplicate/version proposals only)",
+                           [low, high], format_func=lambda cid: f"Cluster {cid}",
+                           horizontal=True, key=f"keep_{pid}")
+        separate_labels = sorted(VALID_LABELS - MERGE_LABELS - {LABEL_INSUFFICIENT})
+        if f"separate_{pid}" not in st.session_state:
+            saved_label = (existing or {}).get("decision")
+            st.session_state[f"separate_{pid}"] = (
+                saved_label if saved_label in separate_labels else LABEL_RELATED_DECISION
+            )
+        separate = separate_col.selectbox("Keep-separate category", separate_labels,
+                                         format_func=LABEL_NAMES.get, key=f"separate_{pid}")
+        actions = [
+            ("Confirm Duplicate", LABEL_PROBABLE_DUPLICATE),
+            ("Mark as Version", LABEL_PROBABLE_VERSION),
+            ("Keep Separate", separate),
+            ("Defer", LABEL_INSUFFICIENT),
+        ]
+        for column, (title, label) in zip(st.columns(4), actions):
+            column.button(title, key=f"decision_{pid}_{label}", use_container_width=True,
+                          type="primary" if label == LABEL_PROBABLE_DUPLICATE else "secondary",
+                          disabled=label in MERGE_LABELS and not valid_ids,
+                          on_click=record_decision, args=(pair, label, mode, demo))
     st.caption("Records a review decision only. No CourtListener database changes are executed.")
 
 
 def main() -> None:
     st.set_page_config(page_title="CourtListener Review Workbench", page_icon="⚖️", layout="wide")
+    st.markdown(
+        f"<style>{Path(__file__).with_name('workbench.css').read_text()}</style>",
+        unsafe_allow_html=True,
+    )
+    with st.sidebar:
+        dark_mode = st.toggle("Dark mode", value=True, key="dark_mode",
+                              help="Switch between the neon dark palette and the warm light palette. "
+                                   "Your current review decisions stay in this session.")
+    if dark_mode:
+        st.markdown(
+            f"<style>{Path(__file__).with_name('workbench-dark.css').read_text()}</style>",
+            unsafe_allow_html=True,
+        )
+    st.markdown('<div class="review-brand"><span>■</span> CourtListener / Review workbench</div>',
+                unsafe_allow_html=True)
+    st.markdown('<div class="review-eyebrow">Duplicate detection · Human validation</div>',
+                unsafe_allow_html=True)
     st.title("CourtListener Case-Identity Review")
     st.caption("Compare records, inspect evidence, and prepare non-destructive review exports.")
     data_dir = find_default_data_dir().resolve()
@@ -312,13 +347,22 @@ def main() -> None:
         return
     with st.sidebar:
         st.header("Review queue")
+        st.caption("A considered review, one case at a time.")
+        with st.expander("Your review guide"):
+            st.markdown(
+                "1. **Compare the records** and read the available excerpts.\n"
+                "2. **Record your judgment** with notes and supporting sources.\n"
+                "3. **Download your decisions** before leaving this session.\n\n"
+                "Blind Review hides machine recommendations until you choose to reveal them. "
+                "No action here changes CourtListener records."
+            )
         source = st.selectbox("Dataset", available, key="dataset", format_func=lambda p: (
             "Synthetic demo (practice only)" if p == DEMO_PATH else p.name
         ))
     demo = source == DEMO_PATH
     if st.session_state.get("source") != str(source):
         for key in list(st.session_state):
-            if key not in {"reviewer", "dataset"}:
+            if key not in {"reviewer", "dataset", "dark_mode"}:
                 del st.session_state[key]
         st.session_state.source = str(source)
     for key, default in [
@@ -340,6 +384,7 @@ def main() -> None:
     if demo:
         st.info("Synthetic demo data — practice only. IDs are not live CourtListener records.")
     with st.sidebar:
+        st.divider()
         mode = st.radio("Review mode", ["Agent-Guided Co-Pilot", "Blind Review"])
         blind = mode == "Blind Review"
         priority = st.selectbox("Priority", ["ALL"] + PRIORITIES, disabled=blind)
@@ -347,12 +392,14 @@ def main() -> None:
                              format_func=lambda v: LABEL_NAMES.get(v, v), disabled=blind)
         if blind:
             st.caption("Prediction-based filters and priority ordering are not used in blind mode.")
+        st.divider()
         status = st.radio("Review status", ["All pairs", "Unreviewed", "Reviewed"])
         st.text_input("Reviewer name", key="reviewer")
         reviewed = len(st.session_state.decisions)
         st.progress(reviewed / len(records) if records else 0)
         st.caption(f"{reviewed} / {len(records)} reviewed")
         st.warning("Decisions are session-only. Download them before leaving or restarting.")
+        st.divider()
         st.subheader("Exports")
         st.caption("Only your recorded decisions are included — never unreviewed predictions.")
         decisions = list(st.session_state.decisions.values())
@@ -391,14 +438,16 @@ def main() -> None:
         st.session_state.selected_pair = ids[max(0, min(index + offset, len(ids) - 1))]
 
     position = ids.index(st.session_state.selected_pair)
-    previous, selector, following = st.columns([1, 4, 1])
-    previous.button("Previous", disabled=position == 0, on_click=navigate, args=(-1,))
+    previous, selector, following = st.columns([1, 4, 1], vertical_alignment="bottom")
+    previous.button("Previous", use_container_width=True, disabled=position == 0, on_click=navigate, args=(-1,))
     with selector:
         pid = st.selectbox("Candidate pair", ids, key="selected_pair")
-    following.button("Next", disabled=position == len(ids) - 1, on_click=navigate, args=(1,))
+    following.button("Next", use_container_width=True, disabled=position == len(ids) - 1, on_click=navigate, args=(1,))
     pair = by_id[pid]
     st.caption(f"Pair {ids.index(pid) + 1} of {len(ids)} · ID: {pid}")
     revealed = pid in st.session_state.revealed_pairs
+    # Show source records first, as in the approved comparison-focused design.
+    render_comparison(pair, demo)
     if not blind or revealed:
         st.write(f"**Priority: {pair['priority']}** — {pair.get('routing_reason', '')}")
         render_evidence(pair)
@@ -407,8 +456,8 @@ def main() -> None:
         if st.button("Reveal machine recommendation"):
             st.session_state.revealed_pairs.add(pid)
             st.rerun()
-    render_comparison(pair, demo)
     if not blind or revealed:
+        st.divider()
         st.header("Falsification check")
         st.caption("Demo uses offline analysis. Other datasets use the configured provider, "
                    "which may send metadata/excerpts to an external model.")
@@ -439,6 +488,7 @@ def main() -> None:
                     "Prediction": LABEL_NAMES.get(r.get("label"), r.get("label")),
                     "Priority": r.get("priority"),
                 } for r in component["pairs"]]), use_container_width=True, hide_index=True)
+    st.divider()
     render_decisions(pair, mode, demo)
 
 

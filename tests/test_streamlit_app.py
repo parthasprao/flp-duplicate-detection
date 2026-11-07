@@ -56,6 +56,25 @@ def test_navigation_and_filters(app):
     assert any("No pairs match" in e.value for e in app.info)
 
 
+def test_theme_switch_preserves_review_and_navigation(app):
+    assert widget(app.toggle, "Dark mode").value is True
+    widget(app.text_area, "Review notes").input("Theme-switch review").run()
+    widget(app.button, "Defer").click().run()
+    saved = deepcopy(app.session_state["decisions"])
+    pid = widget(app.selectbox, "Candidate pair").value
+    widget(app.toggle, "Dark mode").set_value(False).run()
+    assert_no_errors(app)
+    assert app.session_state["decisions"] == saved
+    assert widget(app.selectbox, "Candidate pair").value == pid
+    assert not any("--neon-dark-theme" in e.value for e in app.markdown)
+    widget(app.button, "Next").click().run()
+    assert widget(app.toggle, "Dark mode").value is False
+    widget(app.toggle, "Dark mode").set_value(True).run()
+    assert_no_errors(app)
+    assert app.session_state["decisions"] == saved
+    assert any("--neon-dark-theme" in e.value for e in app.markdown)
+
+
 def test_decision_records_notes_survivor_and_downloads(app):
     widget(app.text_input, "Reviewer name").input("Carla").run()
     widget(app.text_area, "Review notes").input('Reviewed excerpt, "practice only".').run()
