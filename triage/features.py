@@ -153,6 +153,45 @@ def get_reporter_family(cit_key: str) -> str:
     return re.sub(r"(?:2D|3D|4TH|5TH|NS)$", "", rep).strip()
 
 
+def _nonnegative_int(value: Any) -> int:
+    try:
+        parsed = int(value)
+        return parsed if parsed >= 0 else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _optional_nonnegative_int(value: Any) -> Optional[int]:
+    try:
+        parsed = int(value)
+        return parsed if parsed >= 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _citation_reporter(cit: Dict[str, Any]) -> str:
+    reporter = cit.get("reporter")
+    if reporter:
+        return str(reporter).strip()
+    key = str(cit.get("citation_key") or "")
+    parts = key.split("|")
+    if len(parts) >= 2:
+        return parts[1].strip()
+    return ""
+
+
+def _citation_key(cit: Dict[str, Any]) -> str:
+    key = cit.get("citation_key")
+    if key:
+        return re.sub(r"[^a-z0-9]+", "", str(key).lower())
+    vol = cit.get("volume")
+    rep = cit.get("reporter")
+    page = cit.get("page")
+    if vol and rep and page:
+        return re.sub(r"[^a-z0-9]+", "", f"{vol}{rep}{page}".lower())
+    return ""
+
+
 def _instrument_type(text: str) -> str:
     """Classify an excerpt's header as 'judgment', 'opinion' or '' (unknown)."""
     head = (text or "")[:_HEADER_WINDOW]
@@ -171,12 +210,7 @@ def detect_judgment_vs_opinion(
     exc_low: str = "",
     exc_high: str = "",
 ) -> Tuple[bool, str]:
-    """Detect a companion-instrument pair: one record is the formal judgment, the other the opinion.
-
-    Each side is classified separately from its own header, so the pair only counts
-    as a companion when exactly one side carries a stand-alone JUDGMENT heading and
-    the other side is an opinion (or some other non-judgment document).
-    """
+    """Detect a companion-instrument pair: one record is the formal judgment, the other the opinion."""
     if isinstance(low, str) and isinstance(high, str):
         text_low, text_high = low, high
     else:
@@ -201,12 +235,7 @@ _ROLE_WORDS = re.compile(
 
 
 def detect_caption_role_conflict(low: Dict[str, Any], high: Dict[str, Any]) -> Tuple[bool, str]:
-    """Same parties, but the full captions assign a procedural role to a different party.
-
-    Example shape: "A v. B, DEFENDANT-MOVANT, AND C" vs "A v. B, AND C, DEFENDANT-MOVANT".
-    The word sets match but the movant/appellant designation moved, which means two
-    separate motions or appeals by different parties, not one decision twice.
-    """
+    """Same parties, but the full captions assign a procedural role to a different party."""
     low_d = low or {}
     high_d = high or {}
     full_low = (low_d.get("case_name_full") or "").strip()
@@ -242,14 +271,42 @@ def extract_enriched_features(row: Dict[str, Any]) -> Dict[str, Any]:
     parent_link = bool(feat.get("court_parent_link"))
     same_year = bool(feat.get("same_filing_year"))
     delta_days = feat.get("filing_date_delta_days")
-    shared_cits = feat.get("shared_citations", 0) or 0
-    span_min = feat.get("min_page_cluster_span", 0) or 0
-    span_max = feat.get("max_page_cluster_span", 0) or 0
-    max_page_span = max(span_min, span_max)
+
+    # Citations extraction & normalization
+    low_citations = [c for c in (low.get("citations") or []) if isinstance(c, dict)]
+    high_citations = [c for c in (high.get("citations") or []) if isinstance(c, dict)]
+    low_citation_keys = {_citation_key(c) for c in low_citations} - {""}
+    high_citation_keys = {_citation_key(c) for c in high_citations} - {""}
+    shared_citation_keys = low_citation_keys & high_citation_keys
+    feature_shared_cits = _nonnegative_int(feat.get("shared_citations"))
+    shared_cits = max(feature_shared_cits, len(shared_citation_keys))
+
+    span_min = _nonnegative_int(feat.get("min_page_cluster_span"))
+    span_max = _nonnegative_int(feat.get("max_page_cluster_span"))
+    max_page_span = max(span_min, span_max, _nonnegative_int(feat.get("max_page_span")))
+    distinct_decisions_on_shared_page = _optional_nonnegative_int(
+        feat.get("distinct_decisions_on_shared_page")
+    )
+
     shared_sha1 = bool(feat.get("shared_sha1"))
     shared_text_sha = bool(feat.get("shared_text_sha256"))
-    disjoint_rep = bool(feat.get("disjoint_reporters"))
-    title_exact = bool(feat.get("title_exact") or feat.get("title_sorted_exact"))
+
+    low_reporters = {
+        reporter for reporter in (_citation_reporter(c) for c in low_citations) if reporter
+    }
+    high_reporters = {
+        reporter for reporter in (_citation_reporter(c) for c in high_citations) if reporter
+    }
+    disjoint_rep = bool(feat.get("disjoint_reporters")) or bool(
+        low_reporters and high_reporters and low_reporters.isdisjoint(high_reporters)
+    )
+
+    if "title_exact" in feat or "title_sorted_exact" in feat:
+        title_exact = bool(feat.get("title_exact") or feat.get("title_sorted_exact"))
+    else:
+        low_title = re.sub(r"\s+", " ", str(low.get("case_name") or "").lower()).strip()
+        high_title = re.sub(r"\s+", " ", str(high.get("case_name") or "").lower()).strip()
+        title_exact = bool(low_title and high_title and low_title == high_title)
 
     # Normalized core docket matching
     tokens_low = extract_docket_tokens(low)
@@ -260,8 +317,8 @@ def extract_enriched_features(row: Dict[str, Any]) -> Dict[str, Any]:
 
     # True disjoint reporters verification
     if disjoint_rep and shared_cits == 0:
-        cits_l = [c.get("citation_key") or "" for c in (low.get("citations") or []) if isinstance(c, dict)]
-        cits_h = [c.get("citation_key") or "" for c in (high.get("citations") or []) if isinstance(c, dict)]
+        cits_l = [c.get("citation_key") or "" for c in low_citations]
+        cits_h = [c.get("citation_key") or "" for c in high_citations]
         reps_l = {get_reporter_family(c) for c in cits_l if c}
         reps_h = {get_reporter_family(c) for c in cits_h if c}
         if reps_l and reps_h and (reps_l & reps_h):
@@ -281,11 +338,11 @@ def extract_enriched_features(row: Dict[str, Any]) -> Dict[str, Any]:
     role_conflict, role_conflict_reason = detect_caption_role_conflict(low, high)
 
     # SCOTUS cert denial bug (CourtListener data quality defect)
-    court_low = (low.get("court_id") or "").lower()
-    court_high = (high.get("court_id") or "").lower()
+    court_low = str(low.get("court_id") or "").lower()
+    court_high = str(high.get("court_id") or "").lower()
     is_scotus_cafc_cert_bug = (
-        (court_low == "scotus" and court_high == "cafc") or
-        (court_low == "cafc" and court_high == "scotus")
+        (court_low == "scotus" and court_high == "cafc")
+        or (court_low == "cafc" and court_high == "scotus")
     ) and shared_cits > 0
 
     return {
@@ -298,10 +355,14 @@ def extract_enriched_features(row: Dict[str, Any]) -> Dict[str, Any]:
         "same_year": same_year,
         "delta_days": delta_days,
         "shared_cits": shared_cits,
+        "shared_citation_keys": sorted(shared_citation_keys),
         "max_page_span": max_page_span,
+        "distinct_decisions_on_shared_page": distinct_decisions_on_shared_page,
         "shared_sha1": shared_sha1,
         "shared_text_sha": shared_text_sha,
         "disjoint_rep": disjoint_rep,
+        "reporters_low": sorted(low_reporters),
+        "reporters_high": sorted(high_reporters),
         "title_exact": title_exact,
         "has_both_excerpts": has_both_excerpts,
         "token_jaccard": token_jaccard,

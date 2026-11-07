@@ -5,9 +5,11 @@ SAFETY RULES:
 2. NEVER merge if case names completely disagree (`title_exact == 0` and low token similarity),
    even if text hash matches (which occurs on shared reporter/OCR pages holding multiple decisions).
 3. NEVER merge if docket numbers conflict (`doc_conflict == 1`).
-4. If reporter page span >= 2 and shared citations >= 1:
-   - Only consider probable_version if court matches, title matches, docket does not conflict, and text is near-identical.
-   - Otherwise, it is shared_page_ambiguity.
+4. A page-span length is not a count of distinct decisions on a page:
+   - Use explicit page-level decision counts (`distinct_decisions_on_shared_page`) to distinguish
+     `shared_page_ambiguity` (>= 2) from `citation_data_error` (== 1).
+   - If that count is unavailable, route contradictory shared-citation records to
+     `citation_topology_unverified` rather than guessing between two causes.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from triage.constants import (
     LABEL_CITATION_ERROR,
+    LABEL_CITATION_TOPOLOGY_UNVERIFIED,
     LABEL_INSUFFICIENT,
     LABEL_PARALLEL_SPLIT,
     LABEL_PROBABLE_DUPLICATE,
@@ -74,11 +77,9 @@ def _is_surname_only_government_caption(title: str) -> bool:
     lower = title.lower().strip()
 
     def _name_words(part: str) -> List[str]:
-        # Drop court/district designations ("ca2/6") and initials ("j.", "i.f.").
         words = [w for w in re.split(r"[\s,]+", part) if w and not re.search(r"\d", w)]
         return [w for w in (re.sub(r"[^a-z]", "", w) for w in words) if len(w) >= 2]
 
-    # "In re I.F.", "In re Smith": a matter caption with at most one real name word.
     for prefix in ("in re ", "in the matter of "):
         if lower.startswith(prefix):
             return len(_name_words(lower[len(prefix):])) <= 1
@@ -148,12 +149,92 @@ def classify_pair_rule(row: Dict[str, Any]) -> Tuple[str, float, List[str], List
         contradicting.append("Same docket, court and filing date")
         return LABEL_RELATED_DECISION, 0.88, supporting, contradicting
 
+    # Distinct defendant parties check (Smith, E. vs Smith, M.)
+    if " v. " in title_low and " v. " in title_high:
+        p1_low, p2_low = title_low.split(" v. ", 1)
+        p1_high, p2_high = title_high.split(" v. ", 1)
+        if p2_low != p2_high and f["shared_cits"] == 0 and not f["doc_conflict"]:
+            if ("," in p2_low and "," in p2_high) or len(p2_low) != len(p2_high):
+                supporting.append(f"Distinct defendant parties ('{p2_low.strip()}' vs '{p2_high.strip()}')")
+                return LABEL_UNRELATED, 0.88, supporting, contradicting
+
+    # -------------------------------------------------------------------------
+    # RULE 1c: Citation Topology & Reporter Page Disambiguation (Role 2)
+    # -------------------------------------------------------------------------
+    if f["shared_cits"] >= 1:
+        # Same decision matching
+        if (
+            (f["shared_sha1"] or f["shared_text_sha"])
+            and f["same_court"]
+            and f["title_exact"]
+            and not f["doc_conflict"]
+        ):
+            supporting.append("Identical source file SHA-1 or normalized text hash with matching court and title")
+            return LABEL_PROBABLE_DUPLICATE, 0.99, supporting, contradicting
+
+        if (
+            not f["doc_conflict"]
+            and f["same_court"]
+            and f["min_ham"] is not None
+            and f["min_ham"] <= 15
+            and f["len_ratio"] is not None
+            and f["len_ratio"] >= 0.65
+            and (f["title_exact"] or f["token_jaccard"] >= 0.5)
+        ):
+            supporting.append(
+                f"Matching court, case identity, and near-identical text across shared reporter citations (Hamming: {f['min_ham']}, length ratio: {f['len_ratio']:.2f})"
+            )
+            return LABEL_PROBABLE_VERSION, 0.90, supporting, contradicting
+
+        distinct_page_decisions = f["distinct_decisions_on_shared_page"]
+        unrelated_captions = (
+            not f["title_exact"]
+            and f["min_ham"] is not None
+            and f["min_ham"] > 20
+        )
+        conflicting_metadata = f["doc_conflict"] or not f["same_court"] or unrelated_captions
+
+        if distinct_page_decisions is not None and distinct_page_decisions >= 2:
+            supporting.append(
+                f"Reporter-page evidence identifies {distinct_page_decisions} distinct decisions on the shared page"
+            )
+            if f["doc_conflict"]:
+                contradicting.append("Conflicting docket numbers distinguish separate proceedings")
+            if not f["same_court"]:
+                contradicting.append("Different courts assigned to clusters")
+            if not f["title_exact"]:
+                contradicting.append("Case captions do not match exactly")
+            return LABEL_SHARED_PAGE, 0.95, supporting, contradicting
+
+        if distinct_page_decisions == 1 and conflicting_metadata:
+            supporting.append(
+                "Page-level evidence identifies one decision, but the records carry conflicting case metadata for the shared citation"
+            )
+            if f["doc_conflict"]:
+                contradicting.append("Conflicting docket numbers")
+            if not f["same_court"]:
+                contradicting.append("Different courts assigned to clusters")
+            if unrelated_captions:
+                contradicting.append("Case captions and opinion text are substantially different")
+            return LABEL_CITATION_ERROR, 0.88, supporting, contradicting
+
+        if conflicting_metadata:
+            supporting.append(
+                "The records share a citation, but page-span length does not establish how many decisions appear on that page"
+            )
+            if f["doc_conflict"]:
+                contradicting.append("Conflicting docket numbers")
+            if not f["same_court"]:
+                contradicting.append("Different courts assigned to clusters")
+            if not f["title_exact"]:
+                contradicting.append("Case captions do not match exactly")
+            return LABEL_CITATION_TOPOLOGY_UNVERIFIED, 0.90, supporting, contradicting
+
     # -------------------------------------------------------------------------
     # RULE 2a: Same Parties and Court, Different Docket Numbers (Role 3)
     # A distinctive caption repeated under a different docket number in the same
     # court is a companion appeal or a later stage of the same litigation.
-    # Generic "State v. Smith" style captions are excluded: there the shared
-    # caption says nothing about shared litigation.
+    # Generic "State v. Smith" style captions are excluded.
     # -------------------------------------------------------------------------
     if f["doc_conflict"] and f["same_court"] and f["title_exact"] and not generic_surname_caption:
         supporting.append(
@@ -175,41 +256,6 @@ def classify_pair_rule(row: Dict[str, Any]) -> Tuple[str, float, List[str], List
         if f["shared_text_sha"] or f["min_ham"] == 0 or f["is_stock"]:
             contradicting.append("Identical normalized text or stock boilerplate order phrasing")
         return LABEL_UNRELATED, 0.92, supporting, contradicting
-
-    # -------------------------------------------------------------------------
-    # RULE 3: Shared Page with Different Courts or Different Case Titles
-    # -------------------------------------------------------------------------
-    if f["max_page_span"] >= 2 and f["shared_cits"] >= 1:
-        # If courts differ or titles differ, it is definitively shared page ambiguity
-        if not f["same_court"] or not f["title_exact"]:
-            supporting.append(
-                f"Shared reporter citation page carries multiple distinct decisions (cluster span: {f['max_page_span']})"
-            )
-            if not f["same_court"]:
-                contradicting.append("Different courts assigned to clusters")
-            if not f["title_exact"]:
-                contradicting.append(f"Distinct case names ('{low.get('case_name')}' vs '{high.get('case_name')}')")
-            return LABEL_SHARED_PAGE, 0.94, supporting, contradicting
-
-        # If court and title match, check if it's actually alternate versions
-        if (
-            f["same_court"]
-            and f["title_exact"]
-            and not f["doc_conflict"]
-            and f["min_ham"] is not None
-            and f["min_ham"] <= 15
-            and f["len_ratio"] is not None
-            and f["len_ratio"] >= 0.65
-        ):
-            supporting.append(
-                f"Same decision in alternate versions sharing reporter page (Hamming distance: {f['min_ham']}, length ratio: {f['len_ratio']:.2f})"
-            )
-            return LABEL_PROBABLE_VERSION, 0.88, supporting, contradicting
-
-        supporting.append(
-            f"Shared reporter citation page carries multiple distinct decisions (cluster span: {f['max_page_span']})"
-        )
-        return LABEL_SHARED_PAGE, 0.90, supporting, contradicting
 
     # -------------------------------------------------------------------------
     # RULE 4: Different Courts with No Parent Link (Must Stay Separate)
@@ -271,8 +317,6 @@ def classify_pair_rule(row: Dict[str, Any]) -> Tuple[str, float, List[str], List
             contradicting.append("Similar case caption")
             return LABEL_UNRELATED, 0.90, supporting, contradicting
 
-    # Generic surname-only caption with materially different texts and nothing else
-    # tying the records together (no shared docket, citation or parent court).
     if (
         generic_surname_caption
         and f["shared_cits"] == 0
@@ -295,15 +339,6 @@ def classify_pair_rule(row: Dict[str, Any]) -> Tuple[str, float, List[str], List
         if matches:
             contradicting.append(f"Matching {' and '.join(matches)}")
         return LABEL_UNRELATED, 0.85, supporting, contradicting
-
-    # Distinct defendant parties check (Smith, E. vs Smith, M.)
-    if " v. " in title_low and " v. " in title_high:
-        p1_low, p2_low = title_low.split(" v. ", 1)
-        p1_high, p2_high = title_high.split(" v. ", 1)
-        if p2_low != p2_high and f["shared_cits"] == 0 and not f["doc_conflict"]:
-            if ("," in p2_low and "," in p2_high) or len(p2_low) != len(p2_high):
-                supporting.append(f"Distinct defendant parties ('{p2_low.strip()}' vs '{p2_high.strip()}')")
-                return LABEL_UNRELATED, 0.88, supporting, contradicting
 
     # -------------------------------------------------------------------------
     # RULE 8: Procedural Order vs. Merits Opinion (Length ratio disparity)
@@ -350,19 +385,19 @@ def classify_pair_rule(row: Dict[str, Any]) -> Tuple[str, float, List[str], List
     # -------------------------------------------------------------------------
     if (
         f["disjoint_rep"]
-        and f["title_exact"]
+        and f["shared_cits"] == 0
         and f["same_court"]
-        and (f["delta_days"] is None or f["delta_days"] <= 14)
-        and (f["len_ratio"] is None or f["len_ratio"] >= 0.40)
+        and (f["same_doc_num"] or f["title_exact"])
         and not f["doc_conflict"]
+        and (f["delta_days"] is None or f["delta_days"] <= 30)
     ):
-        supporting.append("One decision split across parallel reporter citations with matching court, title, and filing date")
-        if f["min_ham"] is not None and f["min_ham"] > 20:
-            contradicting.append(f"Text differences across versions (Hamming distance: {f['min_ham']})")
-        return LABEL_PARALLEL_SPLIT, 0.86, supporting, contradicting
+        supporting.append(
+            "Distinct non-overlapping official reporter citations for the same court and case identity: split cluster"
+        )
+        return LABEL_PARALLEL_SPLIT, 0.90, supporting, contradicting
 
     # -------------------------------------------------------------------------
-    # RULE 11: Probable Version (Slip vs. Published, Revised Text)
+    # RULE 11: Probable Version (Slip vs. Published / Parallel Opinions)
     # -------------------------------------------------------------------------
     if (
         f["title_exact"]
@@ -378,8 +413,6 @@ def classify_pair_rule(row: Dict[str, Any]) -> Tuple[str, float, List[str], List
         return LABEL_PROBABLE_VERSION, 0.88, supporting, contradicting
 
     # Excerpt Jaccard high match
-    # Excerpts are only the first few hundred characters (mostly caption headers), so
-    # their similarity must not override a full-text fingerprint that says they differ.
     if (
         f["has_both_excerpts"]
         and f["token_jaccard"] >= 0.75
@@ -404,5 +437,5 @@ def classify_pair_rule(row: Dict[str, Any]) -> Tuple[str, float, List[str], List
     # -------------------------------------------------------------------------
     supporting.append("Evidence is conflicting or insufficient to safely recommend consolidation or separation")
     if f["min_ham"] is not None:
-        contradicting.append(f"Hamming distance is {f['min_ham']}")
+        contradicting.append(f"Min Hamming distance is {f['min_ham']}")
     return LABEL_INSUFFICIENT, 0.50, supporting, contradicting

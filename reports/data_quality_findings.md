@@ -65,6 +65,22 @@ In multiple instances, CourtListener ingested the entire page text into one clus
 
 The rule classifier flagged these as duplicates or citation errors because of `shared_citations == 1`. In reality, they are two completely distinct appeals that share physical real estate in the paper reporter.
 
+### Classification and Safety Handling
+
+The triage rules use page-level evidence before the generic docket-conflict rule:
+
+- `distinct_decisions_on_shared_page >= 2` establishes `shared_page_ambiguity` when the records are not strong same-decision matches.
+- `distinct_decisions_on_shared_page == 1`, with conflicting case metadata, supports `citation_data_error`.
+- When that page-level count is missing, a shared citation with conflicting metadata is `citation_topology_unverified` and goes to human/source review.
+- `max_page_cluster_span` describes how many reporter pages each cluster spans. It does not count distinct decisions on one physical page, so the rule does not use it as a substitute for page-occupancy evidence.
+- None of these three outcomes may be converted into a merge recommendation by citation evidence alone.
+
+Citation comparison normalizes reporter punctuation and spacing, and can recover shared citations from cluster citation records when the precomputed count is missing or stale. Raw legal datasets remain outside this repository under the data terms.
+
+### Development-Label Consistency Note
+
+The current development package does not provide `distinct_decisions_on_shared_page`. It contains two training and one validation example labeled `citation_data_error` with conflicting case metadata, but no page-occupancy evidence. Those records—and shared-citation records whose page multiplicity is otherwise unverified—now receive `citation_topology_unverified` instead of being forced into either error or shared-page categories. The Role 2 benchmark routes 35 training and 12 validation pairs to this category, with 0 citation/page hard-negative false merges. The page-level count must come from a reliable source before those labels can be resolved automatically.
+
 ---
 
 ## 4. Analysis of Historical `ClusterRedirection` Table (`flp_cluster_metadata.jsonl`)

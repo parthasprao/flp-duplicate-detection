@@ -15,6 +15,7 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 
 from triage.constants import (
     LABEL_CITATION_ERROR,
+    LABEL_CITATION_TOPOLOGY_UNVERIFIED,
     LABEL_INSUFFICIENT,
     LABEL_PARALLEL_SPLIT,
     LABEL_PROBABLE_DUPLICATE,
@@ -38,6 +39,9 @@ CLASS_ORDER = [
     LABEL_INSUFFICIENT,
 ]
 CLASS_TO_IDX = {c: i for i, c in enumerate(CLASS_ORDER)}
+# The unverified topology result is deterministic/rule-only until annotated
+# training examples exist; include it in reports without inventing ML examples.
+METRIC_CLASS_ORDER = CLASS_ORDER + [LABEL_CITATION_TOPOLOGY_UNVERIFIED]
 
 
 def vector_from_pair(row: Dict[str, Any]) -> List[float]:

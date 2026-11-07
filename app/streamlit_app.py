@@ -41,6 +41,7 @@ LABEL_NAMES = {
     "related_decision": "Related but distinct decision",
     "shared_page_ambiguity": "Shared reporter page",
     "citation_data_error": "Citation data error",
+    "citation_topology_unverified": "Citation topology unverified",
     "unrelated": "Unrelated decisions",
     "insufficient_evidence": "Insufficient evidence",
 }

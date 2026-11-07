@@ -1,17 +1,17 @@
 # Evaluation Report: Case-Identity Triage Engine
 
-**Target Audience:** Data maintainers and engineers at Free Law Project (FLP) / CourtListener.  
+**Target Audience:** Data maintainers and engineers at Free Law Project (FLP) / CourtListener.
 **Dataset:** NYU Law Hackathon 2026 Duplicate Detection track, sampled from CourtListener bulk snapshot.
 
 ---
 
 ## Executive Summary
 
-The baseline CourtListener rule classifier (`duplicate-classifier-v2`) achieves only **37.5% agreement (48/128)** on the adjudicative silver dataset (`dev_silver.jsonl`) and generates a dangerous **26.0% false merge rate (33/127)** on the hard negative falsification challenge set (`hard_negatives.jsonl`).
+The baseline figures below are historical. The latest Role 2 approach prioritizes review when page-level citation evidence is missing, so its current split-safe silver accuracy is lower while citation/page false merges remain zero.
 
-Our **3-Tier Triage Pipeline** (Deterministic Guardrails + Calibrated Feature Ensemble + Falsification Agent + Graph Consistency Engine) achieves:
-1. **Agreement:** **48.15% to 65.6%** agreement with silver ground truth across evaluation splits (+11% to +28% relative gain over baseline).
-2. **Safety First:** Slashes false merges on hard negatives by **over 90%** (from 26.0% down to **2.4%**).
+Our **3-Tier Triage Pipeline** (Deterministic Guardrails + Calibrated Feature Ensemble + Falsification Agent + Graph Consistency Engine) currently reports:
+1. **Agreement:** 36.8% on training and 29.6% on validation; validation baseline agreement is 37.0%.
+2. **Safety First:** 0/12 false merges on citation/page hard negatives; 4/28 false merges across all validation hard negatives.
 3. **Graph Consistency:** Resolves **262 multi-pair connected components** across the 2,100 candidate pairs, intercepting transitive contradictions ($A = B \land B = C \implies A = C$) before any consolidation action is taken.
 4. **Actionable Review Queue:** Sorts 2,100 ingestion candidates into prioritized queues (CRITICAL: 18, HIGH: 324 proposed merges, MEDIUM: 18, LOW: 1,740).
 5. **Dry-Run Payloads:** Exports zero-risk, pre-validated Django ORM specifications (`ClusterRedirection` and `Opinion.main_version`) that maintainers can inspect before executing database migrations.
@@ -24,9 +24,9 @@ To prevent test-set leakage and overfitting during iterative development and age
 
 | Metric (Test Split Locked) | Baseline (`duplicate-classifier-v2`) | Our 3-Tier Triage Engine | Improvement / Status |
 |---|---|---|---|
-| **Training Split Accuracy (76 Pairs)** | 38.2% (29/76) | **50.0% (38/76)** | **+11.8%** |
-| **Validation Split Accuracy (27 Pairs)** | 37.0% (10/27) | **48.1% (13/27)** | **+11.1%** |
-| **Generalization Gap (`Train - Val`)** | +1.2% | **+1.9%** | **PASS (`< 25.0%` threshold)** |
+| **Training Split Accuracy (76 Pairs)** | 38.2% (29/76) | **36.8% (28/76)** | Conservative routing |
+| **Validation Split Accuracy (27 Pairs)** | 37.0% (10/27) | **29.6% (8/27)** | Conservative routing |
+| **Generalization Gap (`Train - Val`)** | +1.2% | **+7.2%** | **PASS (`< 25.0%` threshold)** |
 | **FLP Version-Pairs Validation Recall (n=200)** | N/A | **99.0% (198/200)** | High version recall |
 | **Hard-Negative False Merges (Train, 76 Pairs)** | 26.3% (20/76) | **0.0% (0/76)** | **100% reduction on train** |
 | **Hard-Negative False Merges (Val, 28 Pairs)** | 25.0% (7/28) | **14.3% (4/28)** | **Role 3 target: 0/28** |
@@ -35,24 +35,25 @@ To prevent test-set leakage and overfitting during iterative development and age
 
 Run `.venv/bin/python3 -m triage.cli bench --role <1|2|3|all>` to inspect each role's split-safe baseline scorecard:
 - **Role 1 (Ingestion Normalizer & Version Classifier)**: Tracks `probable_duplicate`, `probable_version`, and `parallel_split_cluster` F1 across `training` and `validation`, plus **Noisy-Docket Merge Recovery** (`Train 4/11 | Val 1/6`) and **FLP Version-Pairs Validation Recall** (`99.0%`).
-- **Role 2 (Citation Topology & Page Disambiguator)**: Tracks `shared_page_ambiguity` (`Train F1 48.8% | Val F1 62.5%`) and `citation_data_error` F1, plus **Hard-Negative Citation/Page False Merges (Val)** (`0/12`).
+- **Role 2 (Citation Topology & Page Disambiguator)**: Uses `citation_topology_unverified` when page-level decision counts are unavailable. Current validation routes 12 shared-citation pairs for review; citation/page hard-negative false merges remain **0/12**.
 - **Role 3 (Litigation Lifecycle & Graph Consistency)**: Tracks `related_decision` (`Train F1 47.1% | Val F1 50.0%`) and `unrelated` F1, plus **Hard-Negative Lifecycle/Caption False Merges (Val)** (`4/16`).
 
 ### Per-Class Performance Breakdown (Validation Split)
 
 ```
-Class                     | Gold   | Pred   | TP   | Prec    | Recall  | F1     
+Class                     | Gold   | Pred   | TP   | Prec    | Recall  | F1
 ---------------------------------------------------------------------------
-probable_duplicate        | 1      | 1      | 0    | 0.0%    | 0.0%    | 0.0%   
-probable_version          | 5      | 3      | 1    | 33.3%   | 20.0%   | 25.0%  
-parallel_split_cluster    | 2      | 0      | 0    | 0.0%    | 0.0%    | 0.0%   
-related_decision          | 4      | 4      | 2    | 50.0%   | 50.0%   | 50.0%  
-shared_page_ambiguity     | 9      | 7      | 5    | 71.4%   | 55.6%   | 62.5%  
-citation_data_error       | 1      | 0      | 0    | 0.0%    | 0.0%    | 0.0%   
-unrelated                 | 5      | 12     | 5    | 41.7%   | 100.0%  | 58.8%  
-insufficient_evidence     | 0      | 0      | 0    | 0.0%    | 0.0%    | 0.0%   
+probable_duplicate        | 1      | 2      | 0    | 0.0%    | 0.0%    | 0.0%
+probable_version          | 5      | 2      | 1    | 50.0%   | 20.0%   | 28.6%
+parallel_split_cluster    | 2      | 0      | 0    | 0.0%    | 0.0%    | 0.0%
+related_decision          | 4      | 4      | 2    | 50.0%   | 50.0%   | 50.0%
+shared_page_ambiguity     | 9      | 0      | 0    | 0.0%    | 0.0%    | 0.0%
+citation_data_error       | 1      | 0      | 0    | 0.0%    | 0.0%    | 0.0%
+unrelated                 | 5      | 7      | 5    | 71.4%   | 100.0%  | 83.3%
+insufficient_evidence     | 0      | 0      | 0    | 0.0%    | 0.0%    | 0.0%
+citation_topology_unverified | 0    | 12     | 0    | 0.0%    | 0.0%    | 0.0%
 ---------------------------------------------------------------------------
-Macro-F1 (supported):     28.05%
+Macro-F1 (supported):     23.13%
 ```
 
 ---
@@ -90,9 +91,10 @@ The hackathon package contains 127 hard negatives (look-alikes that represent di
 - **Baseline Flaw:** Missouri/New York appellate courts frequently file identical 1-sentence summary affirmances ("Judgment affirmed. Rule 84.16(b)") under different docket numbers. Baseline saw `min_hamming == 0` and called `probable_duplicate`.
 - **Our Fix:** Identified in Rule 2. `doc_conflict == True` strictly vetoes duplicate classification, preventing distinct defendants from being consolidated.
 
-### Failure Mode 3: Reporter Page Span (`shared_page_ambiguity`)
-- **Baseline Flaw:** Baseline misclassified multi-decision reporter pages (`min_page_cluster_span >= 2`) as `citation_data_error` or `insufficient_evidence`.
-- **Our Fix:** Identified in Rule 3. When `span >= 2` and `shared_citations >= 1`, we check whether text similarity indicates versions of the same case or distinct decisions on one page.
+### Failure Mode 3: Reporter Page Occupancy Is Unverified
+- The data dictionary defines `min_page_cluster_span` / `max_page_cluster_span` as the number of reporter pages each cluster spans; it does not count distinct decisions printed on one page.
+- The current package has no `distinct_decisions_on_shared_page` feature. The classifier therefore routes conflicting shared-citation pairs to `citation_topology_unverified` instead of guessing between a shared page and a citation error.
+- Validation sends 12 pairs to this review category, with 0 citation/page hard-negative false merges. Add verified page-level counts and labels before measuring `shared_page_ambiguity` or `citation_data_error` recall again.
 
 ---
 

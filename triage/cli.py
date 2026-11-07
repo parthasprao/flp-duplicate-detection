@@ -19,6 +19,7 @@ from triage.bench import (
 from triage.constants import (
     LABEL_INSUFFICIENT,
     MERGE_LABELS,
+    REVIEW_REQUIRED_LABELS,
     VALID_LABELS,
 )
 from triage.export import (
@@ -32,7 +33,7 @@ from triage.io import (
     load_dataset,
     load_development_splits,
 )
-from triage.model import CLASS_ORDER, CalibratedTriageClassifier
+from triage.model import METRIC_CLASS_ORDER, CalibratedTriageClassifier
 from triage.route import assign_queue_priority
 from triage.rules import classify_pair_rule
 
@@ -188,7 +189,7 @@ def evaluate_command(args: argparse.Namespace) -> None:
         per_class_gold[gold_label] += 1
         per_class_pred[pred_label] += 1
 
-        if pred_label == LABEL_INSUFFICIENT:
+        if pred_label in REVIEW_REQUIRED_LABELS:
             abstentions += 1
 
         if pred_label == gold_label:
@@ -220,7 +221,7 @@ def evaluate_command(args: argparse.Namespace) -> None:
     print("-" * 75)
 
     f1_list = []
-    for cls in CLASS_ORDER:
+    for cls in METRIC_CLASS_ORDER:
         g_cnt = per_class_gold[cls]
         p_cnt = per_class_pred[cls]
         tp = per_class_tp[cls]

@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from triage.constants import (
+    LABEL_CITATION_TOPOLOGY_UNVERIFIED,
     LABEL_INSUFFICIENT,
     MERGE_LABELS,
     PRIORITY_CRITICAL,
@@ -44,10 +45,13 @@ def assign_queue_priority(pair_prediction: Dict[str, Any]) -> Dict[str, Any]:
         pred["routing_reason"] = f"Actionable consolidation proposed ({label}, confidence: {conf:.2f})"
         return pred
 
-    # 3. Insufficient evidence / low confidence -> MEDIUM
-    if label == LABEL_INSUFFICIENT or conf < 0.70:
+    # 3. Unverified citation topology / insufficient evidence -> MEDIUM
+    if label in {LABEL_INSUFFICIENT, LABEL_CITATION_TOPOLOGY_UNVERIFIED} or conf < 0.70:
         pred["priority"] = PRIORITY_MEDIUM
-        pred["routing_reason"] = "Confidence below threshold or ambiguous evidence; requires human review"
+        if label == LABEL_CITATION_TOPOLOGY_UNVERIFIED:
+            pred["routing_reason"] = "Shared citation lacks page-level evidence to distinguish a shared page from a citation error"
+        else:
+            pred["routing_reason"] = "Confidence below threshold or ambiguous evidence; requires human review"
         return pred
 
     # 4. Confident keep-separate -> LOW

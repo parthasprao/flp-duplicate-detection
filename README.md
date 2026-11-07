@@ -17,6 +17,7 @@ Public legal databases like CourtListener ingest millions of judicial records fr
 - **Alternate versions** (`probable_version`): Slip opinions, modified/corrected text, or official releases.
 - **Parallel split clusters** (`parallel_split_cluster`): Decisions split across parallel reporters (e.g. West P.2d vs Wash. 2d) or majority/dissent files.
 - **Separate legal decisions** (`related_decision`, `shared_page_ambiguity`, `unrelated`): Different stages of an appeal, companion rulings, or short orders printed on the same reporter page.
+- **Citation topology needing review** (`citation_topology_unverified`): Records share a citation, but the available data does not prove whether multiple decisions appear on that physical page or the citation was attached incorrectly.
 
 **The Golden Safety Mandate:** Incorrectly merging distinct decisions silently corrupts legal research and citation networks. Therefore, classification must be **falsification-first, calibrated, and non-destructive**, generating a trustworthy review queue with dry-run payloads rather than automated database updates.
 
