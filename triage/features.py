@@ -119,10 +119,13 @@ def extract_docket_tokens(cluster: Dict[str, Any]) -> Set[str]:
             core = str(d["docket_number_core"]).strip()
             candidates.append(core)
             if len(core) == 8 and core.isdigit():
-                yy = int(core[:2])
-                yr = 1900 + yy if yy >= 50 else 2000 + yy
-                seq = int(core[2:])
-                tokens.add(f"{yr}-{seq}")
+                y4 = int(core[:4])
+                if 1800 <= y4 <= 2040:
+                    tokens.add(f"{y4}-{int(core[4:])}")
+                else:
+                    yy = int(core[:2])
+                    yr = 1900 + yy if yy >= 50 else 2000 + yy
+                    tokens.add(f"{yr}-{int(core[2:])}")
     if cluster.get("docket_number"):
         candidates.append(str(cluster["docket_number"]))
     if cluster.get("docket_number_core"):
@@ -317,8 +320,8 @@ def extract_enriched_features(row: Dict[str, Any]) -> Dict[str, Any]:
 
     # True disjoint reporters verification
     if disjoint_rep and shared_cits == 0:
-        cits_l = [c.get("citation_key") or "" for c in low_citations]
-        cits_h = [c.get("citation_key") or "" for c in high_citations]
+        cits_l = [c.get("citation_key") or _citation_reporter(c) for c in low_citations]
+        cits_h = [c.get("citation_key") or _citation_reporter(c) for c in high_citations]
         reps_l = {get_reporter_family(c) for c in cits_l if c}
         reps_h = {get_reporter_family(c) for c in cits_h if c}
         if reps_l and reps_h and (reps_l & reps_h):

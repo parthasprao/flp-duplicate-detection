@@ -105,8 +105,8 @@ def classify_pair_rule(row: Dict[str, Any]) -> Tuple[str, float, List[str], List
         (label, confidence, supporting_evidence, contradicting_evidence)
     """
     f = extract_enriched_features(row)
-    low = row.get("cluster_low", {})
-    high = row.get("cluster_high", {})
+    low = row.get("cluster_low") or {}
+    high = row.get("cluster_high") or {}
 
     supporting: List[str] = []
     contradicting: List[str] = []

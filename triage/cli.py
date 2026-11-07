@@ -82,6 +82,11 @@ def run_classification_pipeline(
                     p["confidence"] = agent_res.get("confidence", 0.85)
                     p["evidence"]["contradicting"].extend(agent_res.get("contradicting_evidence", []))
                     p["evidence"]["supporting"].append(agent_res.get("falsification_finding", ""))
+                elif p["label"] == LABEL_INSUFFICIENT and agent_res["label"] != LABEL_INSUFFICIENT:
+                    p["label"] = agent_res["label"]
+                    p["confidence"] = float(agent_res.get("confidence", 0.85))
+                    p["evidence"]["supporting"].extend(agent_res.get("supporting_evidence", []))
+                    p["evidence"]["contradicting"].extend(agent_res.get("contradicting_evidence", []))
 
         # 4. Tier 3: Priority routing
         routed = assign_queue_priority(p)
@@ -143,6 +148,13 @@ def evaluate_command(args: argparse.Namespace) -> None:
             for line in f:
                 if line.strip():
                     preds_list.append(json.loads(line))
+    elif preds_path.suffix == ".csv":
+        import csv
+        with open(preds_path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            preds_list = list(reader)
+    else:
+        raise ValueError(f"Unsupported prediction format: {preds_path.suffix}. Expected .jsonl or .csv")
     pred_map = {p["pair_id"]: p for p in preds_list}
 
     # Load gold with split-lock enforcement (defaults to validation)
@@ -235,9 +247,6 @@ def evaluate_command(args: argparse.Namespace) -> None:
     macro_f1 = sum(f1_list) / len(f1_list) if f1_list else 0.0
     print("-" * 75)
     print(f"Macro-F1 (supported):     {macro_f1:.2%}\n")
-
-
-import collections
 
 
 def bench_command(args: argparse.Namespace) -> None:

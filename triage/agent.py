@@ -65,30 +65,40 @@ Output valid JSON matching this schema:
 
 def _build_pair_prompt(row: Dict[str, Any]) -> str:
     """Format pair metadata and excerpts for the agent."""
-    low = row.get("cluster_low", {})
-    high = row.get("cluster_high", {})
-    feat = row.get("features", {})
+    low = row.get("cluster_low") or {}
+    high = row.get("cluster_high") or {}
+    feat = row.get("features") or {}
     exc_low = row.get("excerpt_low", "") or "[No excerpt available]"
     exc_high = row.get("excerpt_high", "") or "[No excerpt available]"
+
+    court_low = low.get("court")
+    court_low_name = court_low.get("short_name") if isinstance(court_low, dict) else (low.get("court_id") or str(court_low or ""))
+    court_high = high.get("court")
+    court_high_name = court_high.get("short_name") if isinstance(court_high, dict) else (high.get("court_id") or str(court_high or ""))
+
+    docket_low = low.get("docket")
+    docket_low_str = docket_low.get("docket_number") if isinstance(docket_low, dict) else (low.get("docket_number") or str(docket_low or ""))
+    docket_high = high.get("docket")
+    docket_high_str = docket_high.get("docket_number") if isinstance(docket_high, dict) else (high.get("docket_number") or str(docket_high or ""))
 
     return f"""CANDIDATE PAIR: {row.get('pair_id')}
 
 RECORD LOW:
   Cluster ID: {low.get('cluster_id')}
   Case Name: {low.get('case_name')}
-  Court: {low.get('court', {}).get('short_name') or low.get('court_id')}
+  Court: {court_low_name}
   Date Filed: {low.get('date_filed')}
-  Docket: {low.get('docket', {}).get('docket_number')}
-  Citations: {json.dumps(low.get('citations', []))}
+  Docket: {docket_low_str}
+  Citations: {json.dumps(low.get('citations') or [])}
   Excerpt: {exc_low[:600]}
 
 RECORD HIGH:
   Cluster ID: {high.get('cluster_id')}
   Case Name: {high.get('case_name')}
-  Court: {high.get('court', {}).get('short_name') or high.get('court_id')}
+  Court: {court_high_name}
   Date Filed: {high.get('date_filed')}
-  Docket: {high.get('docket', {}).get('docket_number')}
-  Citations: {json.dumps(high.get('citations', []))}
+  Docket: {docket_high_str}
+  Citations: {json.dumps(high.get('citations') or [])}
   Excerpt: {exc_high[:600]}
 
 PAIR FEATURES:
@@ -212,9 +222,13 @@ def call_openrouter(
 
         # Clean markdown codeblocks if model wrapped output in ```json
         cleaned = content.strip()
-        if cleaned.startswith("```"):
-            cleaned = re.sub(r"^```(?:json)?\n?", "", cleaned)
-            cleaned = re.sub(r"\n?```$", "", cleaned)
+        if "```" in cleaned:
+            match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned)
+            if match:
+                cleaned = match.group(1).strip()
+        match_json = re.search(r"\{[\s\S]*\}", cleaned)
+        if match_json:
+            cleaned = match_json.group(0)
 
         parsed = json.loads(cleaned)
         if isinstance(parsed, dict) and "label" in parsed:
@@ -320,12 +334,15 @@ def analyze_with_agent(row: Dict[str, Any]) -> Dict[str, Any]:
     - High-risk / complex pairs or low-confidence fast returns -> Nemotron Ultra
     - Gracefully falls back to offline analyzer on missing keys or network failure.
     """
-    provider = os.environ.get("TRIAGE_LLM", "offline").lower()
+    triage_llm_env = os.environ.get("TRIAGE_LLM")
     openrouter_key = os.environ.get("OPENROUTER_API_KEY")
 
-    # If OPENROUTER_API_KEY is present and provider wasn't explicitly set to offline/gemini, default to openrouter
-    if openrouter_key and provider not in {"offline", "gemini"}:
+    if triage_llm_env:
+        provider = triage_llm_env.lower()
+    elif openrouter_key:
         provider = "openrouter"
+    else:
+        provider = "offline"
 
     # 1. OpenRouter Tiered Routing
     if provider == "openrouter":
@@ -377,12 +394,13 @@ def analyze_with_agent(row: Dict[str, Any]) -> Dict[str, Any]:
         try:
             import requests
 
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+            url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+            headers = {"Content-Type": "application/json", "x-goog-api-key": gemini_key}
             payload = {
                 "contents": [{"parts": [{"text": f"{FALSIFICATION_SYSTEM_PROMPT}\n\n{_build_pair_prompt(row)}"}]}],
                 "generationConfig": {"response_mime_type": "application/json"},
             }
-            resp = requests.post(url, json=payload, timeout=15)
+            resp = requests.post(url, headers=headers, json=payload, timeout=15)
             if resp.status_code == 200:
                 text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
                 parsed = json.loads(text)

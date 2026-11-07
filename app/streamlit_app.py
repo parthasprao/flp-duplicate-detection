@@ -145,7 +145,8 @@ def record_decision(pair: dict, label: str, mode: str, demo: bool) -> None:
     }
     if label in MERGE_LABELS:
         keep = st.session_state.get(f"keep_{pid}", low)
-        decision.update(keep_cluster_id=keep, delete_cluster_id=high if keep == low else low)
+        is_low = str(keep) == str(low)
+        decision.update(keep_cluster_id=keep, delete_cluster_id=high if is_low else low)
     st.session_state.decisions[pid] = decision
     # Freeze the first judgment separately from any later changes.
     st.session_state.initial_decisions.setdefault(pid, dict(decision))
