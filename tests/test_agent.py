@@ -14,10 +14,10 @@ from triage.agent import (
     run_offline_falsification,
 )
 from triage.constants import (
+    LABEL_CITATION_TOPOLOGY_UNVERIFIED,
     LABEL_PROBABLE_DUPLICATE,
     LABEL_PROBABLE_VERSION,
     LABEL_RELATED_DECISION,
-    LABEL_SHARED_PAGE,
     LABEL_UNRELATED,
 )
 
@@ -55,7 +55,7 @@ def _make_pair(
             "cluster_id": 102,
             "case_name": "Acme Corp v. Beta Inc",
             "court_id": "ca9",
-            "docket": {"docket_number": "21-1234" if same_doc else "21-9999"},
+            "docket": {"docket_number": "21-1234"},
             "date_filed": "2021-01-01",
         },
         "excerpt_low": "Affirmed. Opinion of the court.",
@@ -78,7 +78,7 @@ def test_is_complex_pair_docket_conflict() -> None:
 
 
 def test_is_complex_pair_multi_page_span() -> None:
-    pair = _make_pair(max_page_span=3)
+    pair = _make_pair(max_page_span=3, doc_conflict=1, same_doc=0)
     is_complex, reason = is_complex_pair(pair)
     assert is_complex
     assert "page span" in reason.lower()
@@ -108,6 +108,13 @@ def test_analyze_with_agent_offline_fallback(monkeypatch: pytest.MonkeyPatch) ->
     assert "falsification_finding" in res
 
 
+def test_offline_falsifier_routes_unverified_shared_citation_for_review() -> None:
+    pair = _make_pair(doc_conflict=1, same_doc=0)
+    result = run_offline_falsification(pair)
+    assert result["label"] == LABEL_CITATION_TOPOLOGY_UNVERIFIED
+    assert "page-occupancy" in result["falsification_finding"]
+
+
 def test_analyze_with_agent_openrouter_fast_success(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TRIAGE_LLM", "openrouter")
     monkeypatch.setenv("OPENROUTER_API_KEY", "mock-key")
@@ -134,12 +141,12 @@ def test_analyze_with_agent_openrouter_fast_success(monkeypatch: pytest.MonkeyPa
 def test_analyze_with_agent_openrouter_complex_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TRIAGE_LLM", "openrouter")
     monkeypatch.setenv("OPENROUTER_API_KEY", "mock-key")
-    pair = _make_pair(max_page_span=3)  # Complex
+    pair = _make_pair(max_page_span=3, doc_conflict=1, same_doc=0)  # Complex
 
     mock_llm_response = {
-        "label": LABEL_SHARED_PAGE,
+        "label": LABEL_CITATION_TOPOLOGY_UNVERIFIED,
         "confidence": 0.92,
-        "falsification_finding": "Reporter page span 3 indicates table holding separate opinions",
+        "falsification_finding": "Page count is unavailable for the shared citation",
         "supporting_evidence": ["Page span ambiguity"],
         "contradicting_evidence": [],
         "maintainer_summary": "Distinct rulings printed on same page.",
@@ -147,7 +154,7 @@ def test_analyze_with_agent_openrouter_complex_dispatch(monkeypatch: pytest.Monk
 
     with patch("triage.agent.call_openrouter", return_value=mock_llm_response) as mock_call:
         res = analyze_with_agent(pair)
-        assert res["label"] == LABEL_SHARED_PAGE
+        assert res["label"] == LABEL_CITATION_TOPOLOGY_UNVERIFIED
         assert res["tier"] == "complex"
         assert res["model_used"] == "nvidia/nemotron-4-340b-instruct"
         assert mock_call.call_count == 1

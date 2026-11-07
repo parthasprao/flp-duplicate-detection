@@ -90,6 +90,7 @@ def test_rules_shared_page_span() -> None:
             "shared_citations": 1,
             "min_page_cluster_span": 3,
             "max_page_cluster_span": 3,
+            "distinct_decisions_on_shared_page": 3,
             "title_exact": 0,
         },
         "cluster_low": {"cluster_id": 30, "case_name": "Wood v. US", "court_id": "cafc"},
