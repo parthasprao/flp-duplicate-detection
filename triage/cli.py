@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -71,6 +72,8 @@ def run_classification_pipeline(
         if use_agent_tier and (p.get("label") in MERGE_LABELS or p.get("label") == LABEL_INSUFFICIENT):
             agent_res = analyze_with_agent(pair_map[pid])
             p["agent_finding"] = agent_res.get("falsification_finding")
+            p["agent_tier"] = agent_res.get("tier")
+            p["agent_model"] = agent_res.get("model_used")
             if agent_res.get("label") in VALID_LABELS:
                 # If agent found a falsifying fact, downgrade merge
                 if p["label"] in MERGE_LABELS and agent_res["label"] not in MERGE_LABELS:
@@ -94,6 +97,9 @@ def classify_command(args: argparse.Namespace) -> None:
     print(f"Loading input file: {in_path}...")
     records = load_dataset(in_path)
     print(f"Loaded {len(records)} candidate pairs.")
+
+    if args.agent != "none":
+        os.environ["TRIAGE_LLM"] = args.agent
 
     # Check for training data to fit calibrated model
     data_dir = find_default_data_dir()
@@ -255,7 +261,7 @@ def main() -> None:
     p_classify = subparsers.add_parser("classify", help="Classify candidate pairs file")
     p_classify.add_argument("input", help="Path to input candidate file (.jsonl or .csv)")
     p_classify.add_argument("--out", "-o", required=True, help="Path for output predictions (.jsonl or .csv)")
-    p_classify.add_argument("--agent", choices=["offline", "gemini", "none"], default="offline", help="Agent tier mode")
+    p_classify.add_argument("--agent", choices=["offline", "openrouter", "gemini", "none"], default="offline", help="Agent tier mode")
     p_classify.add_argument("--dry-run-payloads", help="Path to export CourtListener ClusterRedirection payloads")
     p_classify.set_defaults(func=classify_command)
 
