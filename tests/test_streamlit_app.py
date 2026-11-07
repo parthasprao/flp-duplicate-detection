@@ -175,8 +175,9 @@ def test_missing_metadata_and_empty_excerpts(monkeypatch, tmp_path):
     (tmp_path / "candidates.jsonl").write_text(json.dumps(row))
     app = AppTest.from_file(str(APP), default_timeout=30).run()
     assert_no_errors(app)
-    assert next(e for e in app.metric if e.label == "Same court").value == "Not available"
-    assert next(e for e in app.metric if e.label == "Docket status").value == "Not available"
+    text = [e.value for e in app.markdown]
+    assert text[text.index("**Same court**") + 1] == "Not available"
+    assert text[text.index("**Docket status**") + 1] == "Not available"
     assert widget(app.text_area, "Record A excerpt").value == "No text excerpt available"
 
 
@@ -203,3 +204,14 @@ def test_safe_display_and_links():
         "https://www.courtlistener.com/opinion/123/"
     )
     assert courtlistener_url({}, "https://evil.example/") is None
+
+
+def test_long_relationship_uses_wrapping_text_and_flags_inconsistent_signal(app):
+    widget(app.selectbox, "Candidate pair").select("1005-1006").run()
+    assert_no_errors(app)
+    assert any(e.value == "**Shared reporter page**" for e in app.markdown)
+    assert not any(e.label == "Proposed relationship" for e in app.metric)
+    assert any("Source-data inconsistency" in e.value for e in app.warning)
+    # Presentation warning only: the original supplied signal remains unchanged.
+    text = [e.value for e in app.markdown]
+    assert text[text.index("**Same court**") + 1] == "No"

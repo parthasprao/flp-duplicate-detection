@@ -84,10 +84,13 @@ that limitation rather than claiming corpus validation. Never unlock the test se
 ### Results for this branch
 
 - Baseline suite before UI edits: 44 passed, 5 skipped.
-- Suite after UI edits: 55 passed, 5 skipped, including 11 new UI/export tests.
+- Suite after the browser walkthrough fixes: 56 passed, 5 skipped, including
+  12 UI/export tests.
 - `git diff --check`: passed.
 - Whole-project benchmark attempted but blocked by missing `dev_silver.jsonl`.
   The five skipped tests also require local development data.
 - No held-out test split was unlocked; no external model calls were used.
-- UI checks use Streamlit AppTest, not a manual browser/visual inspection.
+- A local Chromium/Playwright walkthrough also exercised the synthetic demo,
+  real browser downloads, blind-mode reveal and responsive layouts. See
+  [the walkthrough report](ui-walkthrough.md) for coverage and limits.
 - Verification environment: Python 3.13.11 and Streamlit 1.67.0.

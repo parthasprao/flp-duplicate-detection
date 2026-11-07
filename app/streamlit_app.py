@@ -178,7 +178,10 @@ def render_evidence(pair: dict) -> None:
     with st.expander("Machine recommendation and evidence", expanded=True):
         left, right = st.columns([1, 2])
         with left:
-            st.metric("Proposed relationship", LABEL_NAMES.get(pair["label"], pair["label"]))
+            st.caption("Proposed relationship")
+            # Metric values truncate long relationship names on laptop screens.
+            # Normal text wraps without custom CSS or a responsive-layout framework.
+            st.markdown(f"**{LABEL_NAMES.get(pair['label'], pair['label'])}**")
             st.metric("Model confidence", f"{pair.get('confidence', 0):.1%}")
             st.caption("Machine recommendation, not an approved action.")
         with right:
@@ -213,9 +216,23 @@ def render_comparison(pair: dict, demo: bool) -> None:
         "Hamming distance": display(features.get("min_hamming")),
         "Text length ratio": display(features.get("text_length_ratio")),
     }
-    for column, (title, value) in zip(st.columns(6), signals.items()):
-        column.metric(title, value)
+    items = list(signals.items())
+    for offset in range(0, len(items), 3):
+        for column, (title, value) in zip(st.columns(3), items[offset:offset + 3]):
+            column.markdown(f"**{title}**")
+            column.write(value)
     st.caption("Signals are supplied by the data/pipeline; missing values are not mismatches.")
+    court_a, court_b = low.get("court_id"), high.get("court_id")
+    supplied_same_court = yes_no(features.get("same_court"))
+    if (
+        court_a and court_b and supplied_same_court != "Not available"
+        and (supplied_same_court == "Yes") != (court_a == court_b)
+    ):
+        st.warning(
+            "Source-data inconsistency: the supplied 'Same court' signal conflicts "
+            "with the displayed court IDs. The UI has not changed the signal or "
+            "prediction; check the source before relying on this evidence."
+        )
     excerpts = [pair.get("excerpt_low") or "", pair.get("excerpt_high") or ""]
     with st.expander("Text excerpts and differences", expanded=True):
         for column, side, text in zip(st.columns(2), ["A", "B"], excerpts):
@@ -249,6 +266,7 @@ def render_decisions(pair: dict, mode: str, demo: bool) -> None:
             st.session_state[key] = value
     st.text_area("Review notes", key=f"notes_{pid}", height=80)
     st.text_input("Evidence cited (source link or passage)", key=f"evidence_{pid}")
+    st.caption("Use a decision button below to save these fields with your review.")
     low = (pair.get("cluster_low") or {}).get("cluster_id")
     high = (pair.get("cluster_high") or {}).get("cluster_id")
     valid_ids = low is not None and high is not None and low != high
