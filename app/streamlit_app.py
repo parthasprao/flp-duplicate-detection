@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 import streamlit as st
 
-from triage.agent import run_offline_falsification
+from triage.agent import analyze_with_agent, run_offline_falsification
 from triage.constants import (
     CLUSTER_REDIRECTION_MAP,
     LABEL_INSUFFICIENT,
@@ -326,7 +326,16 @@ def main() -> None:
     st.subheader("🕵️ Tier 2: Falsification Devil's Advocate Analysis")
     if st.button("Run Falsification Agent Check"):
         with st.spinner("Analyzing merge hypothesis and testing for contradictions..."):
-            agent_output = run_offline_falsification(current_pair)
+            agent_output = analyze_with_agent(current_pair)
+            tier = agent_output.get("tier", "offline")
+            model = agent_output.get("model_used", "offline_analyzer")
+            tier_badge = {
+                "fast": "⚡ GLM 5.3 Flash (Fast Inference)",
+                "complex": "🧠 Nemotron Ultra (Deep Reasoning)",
+                "offline": "🛡️ Offline Rule Analyzer",
+            }.get(tier, tier)
+
+            st.markdown(f"**Inference Tier:** `{tier_badge}` (Model: `{model}`)")
             st.info(f"**Agent Finding:** {agent_output.get('falsification_finding')}")
             st.write(f"**Maintainer Summary:** {agent_output.get('maintainer_summary')}")
 
