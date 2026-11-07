@@ -2,6 +2,7 @@
 
 Trains on training split of dev_silver and hard_negatives using scikit-learn.
 Emits calibrated probabilities across the 8-label set and abstains below a confidence threshold.
+Includes strict anti-leakage verification in .fit() to forbid training on validation or test splits.
 """
 
 from __future__ import annotations
@@ -10,8 +11,7 @@ import math
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import HistGradientBoostingClassifier
 
 from triage.constants import (
     LABEL_CITATION_ERROR,
@@ -22,7 +22,6 @@ from triage.constants import (
     LABEL_RELATED_DECISION,
     LABEL_SHARED_PAGE,
     LABEL_UNRELATED,
-    VALID_LABELS,
 )
 from triage.features import extract_enriched_features
 from triage.rules import classify_pair_rule
@@ -79,11 +78,21 @@ class CalibratedTriageClassifier:
         self.classes_: List[str] = CLASS_ORDER
 
     def fit(self, training_records: List[Dict[str, Any]]) -> "CalibratedTriageClassifier":
-        """Train the classifier on labeled training rows."""
+        """Train the classifier on labeled training rows.
+
+        Raises:
+            ValueError: If any record carries split='validation' or split='test'.
+        """
         X: List[List[float]] = []
         y: List[int] = []
 
         for r in training_records:
+            row_split = r.get("split")
+            if row_split in {"validation", "test"}:
+                raise ValueError(
+                    f"DATA LEAKAGE BLOCKED: Record {r.get('pair_id')!r} has split={row_split!r}. "
+                    "CalibratedTriageClassifier.fit() strictly requires split='training' (or unlabeled synthetic fixtures)."
+                )
             label = r.get("silver_label") or r.get("family") or r.get("rule_class")
             if label not in CLASS_TO_IDX:
                 continue
@@ -96,7 +105,6 @@ class CalibratedTriageClassifier:
         X_arr = np.array(X, dtype=np.float32)
         y_arr = np.array(y, dtype=np.int64)
 
-        # Train a robust gradient boosting model with class weights
         self.model = HistGradientBoostingClassifier(
             max_iter=100,
             learning_rate=0.08,
@@ -108,14 +116,11 @@ class CalibratedTriageClassifier:
 
     def predict_pair(self, row: Dict[str, Any]) -> Tuple[str, float, List[str], List[str]]:
         """Predict pair relationship by combining high-precision rules and calibrated ML."""
-        # 1. First run the deterministic domain rules
         rule_label, rule_conf, sup, con = classify_pair_rule(row)
 
-        # If rules triggered a high-confidence determination, respect it
         if rule_conf >= 0.88:
             return rule_label, rule_conf, sup, con
 
-        # 2. If model is trained, consult calibrated probabilities
         if self.model is not None:
             x = np.array([vector_from_pair(row)], dtype=np.float32)
             probs = self.model.predict_proba(x)[0]
@@ -127,5 +132,4 @@ class CalibratedTriageClassifier:
                 sup.append(f"Calibrated feature model confidence: {best_conf:.2f} for {model_label}")
                 return model_label, best_conf, sup, con
 
-        # 3. If below threshold, abstain with insufficient_evidence
         return rule_label, rule_conf, sup, con

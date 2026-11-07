@@ -132,22 +132,22 @@ def detect_graph_contradictions(
             else:
                 separate_edges.add((u, v))
 
-        # Check for 3-cycles with 2 merges and 1 separation
-        clusters = list(comp["cluster_ids"])
-        for i in range(len(clusters)):
-            for j in range(i + 1, len(clusters)):
-                for k in range(j + 1, len(clusters)):
-                    a, b, c = clusters[i], clusters[j], clusters[k]
-                    e_ab = (min(a, b), max(a, b))
-                    e_bc = (min(b, c), max(b, c))
-                    e_ac = (min(a, c), max(a, c))
+        # Check for arbitrary-length transitive merge contradictions (3-cycles, 4-cycles, n-cycles)
+        merge_uf = UnionFind()
+        for u, v in merge_edges:
+            merge_uf.union(u, v)
 
-                    # Case: AB is merge, BC is merge, AC is separate
-                    if e_ab in merge_edges and e_bc in merge_edges and e_ac in separate_edges:
-                        msg = f"Transitive contradiction in {comp_id}: {a}={b} (merge) and {b}={c} (merge), but {a}!={c} (keep separate)"
-                        contradictions[f"{e_ab[0]}-{e_ab[1]}"].append(msg)
-                        contradictions[f"{e_bc[0]}-{e_bc[1]}"].append(msg)
-                        contradictions[f"{e_ac[0]}-{e_ac[1]}"].append(msg)
+        for sep_u, sep_v in separate_edges:
+            if merge_uf.find(sep_u) == merge_uf.find(sep_v):
+                msg = (
+                    f"Transitive contradiction in {comp_id}: clusters {sep_u} and {sep_v} are connected "
+                    f"by a chain of proposed merges, but pair {sep_u}-{sep_v} is marked keep-separate"
+                )
+                contradictions[f"{sep_u}-{sep_v}"].append(msg)
+                root = merge_uf.find(sep_u)
+                for mu, mv in merge_edges:
+                    if merge_uf.find(mu) == root:
+                        contradictions[f"{mu}-{mv}"].append(msg)
 
     return dict(contradictions)
 

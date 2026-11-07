@@ -59,11 +59,20 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-### 2. Run Automated Tests
+### 2. Run Automated Tests & Split-Safe Test Benches
 
 ```bash
-pytest -v
+# Run full pytest suite (including anti-leakage guardrails and Role 1/2/3 unit benches)
+.venv/bin/pytest -v
+
+# Run split-safe Training vs. Validation benchmark scorecards (Test split locked!)
+.venv/bin/python3 -m triage.cli bench --role all
+.venv/bin/python3 -m triage.cli bench --role 1   # Role 1: Normalizer & Versions
+.venv/bin/python3 -m triage.cli bench --role 2   # Role 2: Citations & Shared Pages
+.venv/bin/python3 -m triage.cli bench --role 3   # Role 3: Lifecycle & Graph Consistency
 ```
+
+> **Anti-Cheating & Anti-Overfitting Guardrails:** See [`AGENTS.md`](AGENTS.md) and [`tests/test_anti_leakage.py`](tests/test_anti_leakage.py). Accessing `split == "test"` is blocked by default via `TestSetLockError`, `.fit()` rejects `validation` and `test` splits, and `triage/*.py` is continuously scanned to forbid hardcoded pair/cluster IDs.
 
 ### 3. Run the CLI Triage Pipeline
 

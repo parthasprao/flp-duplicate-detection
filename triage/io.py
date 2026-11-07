@@ -1,14 +1,27 @@
-"""I/O utilities for loading CourtListener candidates, silver labels, excerpts, and exporting predictions."""
+"""I/O utilities for loading CourtListener candidates, silver labels, excerpts, and exporting predictions.
+
+Includes strict anti-leakage guardrails to prevent accidental or unauthorized access to held-out `test` split rows.
+"""
 
 from __future__ import annotations
 
 import csv
+import functools
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Set, Union
 
 from triage.constants import VALID_LABELS
+
+ALLOWED_DEV_SPLITS: Set[str] = {"training", "validation"}
+
+
+class TestSetLockError(PermissionError):
+    """Raised when an operation attempts to access or evaluate the held-out test split without explicit unlock."""
+
+    __test__ = False
 
 
 def find_default_data_dir() -> Path:
@@ -29,6 +42,7 @@ def find_default_data_dir() -> Path:
     return Path(".")
 
 
+@functools.lru_cache(maxsize=4)
 def load_excerpts(excerpts_path: Union[str, Path]) -> Dict[int, str]:
     """Load cluster excerpts into a map of cluster_id -> excerpt text."""
     path = Path(excerpts_path)
@@ -60,8 +74,87 @@ def load_excerpts(excerpts_path: Union[str, Path]) -> Dict[int, str]:
     return excerpts
 
 
+def _normalize_flp_version_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize an opinion-level row from flp_version_pairs into the canonical pair structure."""
+    dup_op_id = row.get("duplicate_opinion_id")
+    main_op_id = row.get("main_opinion_id")
+    pair_id = str(row.get("pair_id") or f"flp-{dup_op_id}-{main_op_id}")
+
+    exc_low = (row.get("duplicate_opinion_excerpt") or "").strip()
+    exc_high = (row.get("main_opinion_excerpt") or "").strip()
+    len_low = len(exc_low)
+    len_high = len(exc_high)
+    len_ratio = (
+        (min(len_low, len_high) / max(len_low, len_high))
+        if (len_low > 0 and len_high > 0)
+        else (1.0 if row.get("same_page_count") else 0.85)
+    )
+
+    dup_doc = row.get("duplicate_docket_number")
+    main_doc = row.get("main_docket_number")
+    same_doc = 1 if (dup_doc and main_doc and str(dup_doc).strip() == str(main_doc).strip()) else 0
+    same_court = 1 if (row.get("duplicate_court_id") == row.get("main_court_id")) else 0
+    same_title = 1 if (row.get("duplicate_case_name") == row.get("main_case_name")) else 0
+    sim = row.get("excerpt_similarity")
+    est_hamming = int(round((1.0 - float(sim)) * 32)) if sim is not None else (0 if row.get("same_sha1") else 6)
+
+    row["pair_id"] = pair_id
+    row["excerpt_low"] = exc_low
+    row["excerpt_high"] = exc_high
+    row["features"] = {
+        "cluster_id_low": row.get("duplicate_cluster_id") or dup_op_id,
+        "cluster_id_high": row.get("main_cluster_id") or main_op_id,
+        "same_docket_id": 1 if row.get("same_cluster") else same_doc,
+        "same_docket_number": 1 if row.get("same_cluster") else same_doc,
+        "docket_numbers_conflict": 0,
+        "same_court": same_court,
+        "court_parent_link": 0,
+        "title_exact": same_title,
+        "title_sorted_exact": same_title,
+        "same_filing_year": 1 if row.get("duplicate_date_filed") == row.get("main_date_filed") else 0,
+        "filing_date_delta_days": row.get("created_gap_days") or 0,
+        "shared_citations": 1 if (row.get("duplicate_citations") and row.get("duplicate_citations") == row.get("main_citations")) else 0,
+        "disjoint_reporters": 0,
+        "min_page_cluster_span": 1,
+        "max_page_cluster_span": 1,
+        "same_precedential": 1 if row.get("duplicate_precedential_status") == row.get("main_precedential_status") else 0,
+        "same_source": 1 if row.get("duplicate_source") == row.get("main_source") else 0,
+        "shared_sha1": 1 if row.get("same_sha1") else 0,
+        "shared_text_sha256": 1 if (row.get("same_sha1") or sim == 1.0) else 0,
+        "min_hamming": est_hamming,
+        "text_length_ratio": len_ratio,
+        "same_download_url": bool(row.get("same_download_url")),
+    }
+    row["cluster_low"] = {
+        "cluster_id": row.get("duplicate_cluster_id") or dup_op_id,
+        "case_name": row.get("duplicate_case_name") or "",
+        "court_id": row.get("duplicate_court_id") or "",
+        "date_filed": row.get("duplicate_date_filed"),
+        "source": row.get("duplicate_source"),
+        "precedential_status": row.get("duplicate_precedential_status"),
+        "docket": {"docket_number": dup_doc},
+        "court": {"short_name": row.get("duplicate_court")},
+        "citations": [{"citation_key": c} for c in (row.get("duplicate_citations") or [])],
+    }
+    row["cluster_high"] = {
+        "cluster_id": row.get("main_cluster_id") or main_op_id,
+        "case_name": row.get("main_case_name") or "",
+        "court_id": row.get("main_court_id") or "",
+        "date_filed": row.get("main_date_filed"),
+        "source": row.get("main_source"),
+        "precedential_status": row.get("main_precedential_status"),
+        "docket": {"docket_number": main_doc},
+        "court": {"short_name": row.get("main_court")},
+        "citations": [{"citation_key": c} for c in (row.get("main_citations") or [])],
+    }
+    return row
+
+
 def _normalize_row_from_json(row: Dict[str, Any], excerpts: Optional[Dict[int, str]] = None) -> Dict[str, Any]:
-    """Ensure consistent structure for JSONL candidate/silver rows."""
+    """Ensure consistent structure for JSONL candidate/silver/FLP rows."""
+    if "duplicate_opinion_id" in row and "features" not in row:
+        return _normalize_flp_version_row(row)
+
     pair_id = str(row.get("pair_id", ""))
     features = row.get("features", {})
     low = row.get("cluster_low", {})
@@ -124,6 +217,9 @@ def _normalize_row_from_csv(row: Dict[str, Any], excerpts: Optional[Dict[int, st
         else:
             top_level[k] = parsed_v
 
+    if "duplicate_opinion_id" in top_level and not features:
+        return _normalize_flp_version_row(top_level)
+
     cid_low = features.get("cluster_id_low") or cluster_low.get("cluster_id")
     cid_high = features.get("cluster_id_high") or cluster_high.get("cluster_id")
 
@@ -148,11 +244,37 @@ def _normalize_row_from_csv(row: Dict[str, Any], excerpts: Optional[Dict[int, st
     return top_level
 
 
+def _audit_log_test_access(path: Path, split: Optional[str], caller_reason: str) -> None:
+    """Append an entry to outputs/.test_access_audit.log whenever test split is unlocked."""
+    audit_path = Path("outputs/.test_access_audit.log")
+    try:
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "file": str(path),
+            "split": split,
+            "reason": caller_reason,
+        }
+        with open(audit_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError:
+        pass
+
+
 def load_dataset(
     path: Union[str, Path],
     excerpts_path: Optional[Union[str, Path]] = None,
+    split: Optional[Union[str, Iterable[str]]] = None,
+    allow_test_split: bool = False,
 ) -> List[Dict[str, Any]]:
-    """Load a dataset from JSONL or CSV and normalize it into canonical format."""
+    """Load a dataset from JSONL or CSV and normalize it into canonical format.
+
+    Args:
+        path: Path to .jsonl or .csv dataset.
+        excerpts_path: Optional path to excerpts.jsonl/.csv.
+        split: Optional split filter ('training', 'validation', 'train_val', or an iterable of splits).
+        allow_test_split: Must be True to explicitly load 'test' split rows when filtering by split='test'.
+    """
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"File not found: {p}")
@@ -161,7 +283,6 @@ def load_dataset(
     if excerpts_path:
         excerpts = load_excerpts(excerpts_path)
     else:
-        # Check if excerpts.jsonl lives in the same folder
         same_dir_excerpts = p.parent / "excerpts.jsonl"
         if same_dir_excerpts.exists():
             excerpts = load_excerpts(same_dir_excerpts)
@@ -182,7 +303,40 @@ def load_dataset(
     else:
         raise ValueError(f"Unsupported format: {p.suffix}. Expected .jsonl or .csv")
 
+    if split is not None:
+        if isinstance(split, str):
+            if split == "train_val":
+                allowed_splits = {"training", "validation"}
+            else:
+                allowed_splits = {split}
+        else:
+            allowed_splits = set(split)
+
+        if "test" in allowed_splits and not allow_test_split:
+            raise TestSetLockError(
+                "TEST SET LOCKED: Accessing split='test' is forbidden during iterative development and agent tuning. "
+                "Use split='training' or split='validation'. For a final end-of-project check, pass allow_test_split=True "
+                "or --unlock-test-set on the CLI."
+            )
+        if "test" in allowed_splits and allow_test_split:
+            _audit_log_test_access(p, str(split), "load_dataset(allow_test_split=True)")
+
+        records = [r for r in records if r.get("split") in allowed_splits]
+
     return records
+
+
+def load_development_splits(
+    path: Union[str, Path],
+    splits: Iterable[str] = ("training", "validation"),
+) -> List[Dict[str, Any]]:
+    """Safely load ONLY development splits (training and/or validation), hard-blocking test rows."""
+    requested = set(splits)
+    if "test" in requested or not requested.issubset(ALLOWED_DEV_SPLITS):
+        raise TestSetLockError(
+            f"load_development_splits only permits {ALLOWED_DEV_SPLITS}, got {requested}."
+        )
+    return load_dataset(path, split=requested, allow_test_split=False)
 
 
 def write_predictions_jsonl(predictions: List[Dict[str, Any]], out_path: Union[str, Path]) -> None:
@@ -191,7 +345,6 @@ def write_predictions_jsonl(predictions: List[Dict[str, Any]], out_path: Union[s
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
         for p in predictions:
-            # Validate label
             label = p.get("label")
             if label not in VALID_LABELS:
                 raise ValueError(f"Invalid label {label} in pair {p.get('pair_id')}")

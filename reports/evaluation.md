@@ -18,17 +18,25 @@ Our **3-Tier Triage Pipeline** (Deterministic Guardrails + Calibrated Feature En
 
 ---
 
-## 1. Performance Comparison on Silver Development Set (`dev_silver`)
+## 1. Split-Safe Performance Comparison on Silver Development Set (`dev_silver`)
 
-The development dataset comprises 128 candidate pairs independently labeled and corroborated by two AI models (Claude Opus and GPT) reading full CourtListener opinion texts.
+To prevent test-set leakage and overfitting during iterative development and agent-assisted coding, the 25 `test`-split rows in `dev_silver.jsonl` and 23 `test`-split rows in `hard_negatives.jsonl` are **programmatically locked** via `TestSetLockError` (`triage/io.py` and `tests/test_anti_leakage.py`). All model training (`CalibratedTriageClassifier.fit()`) runs strictly on `split == "training"`, and generalization is tracked on `split == "validation"`.
 
-| Metric | Baseline (`duplicate-classifier-v2`) | Our 3-Tier Triage Engine | Improvement |
+| Metric (Test Split Locked) | Baseline (`duplicate-classifier-v2`) | Our 3-Tier Triage Engine | Improvement / Status |
 |---|---|---|---|
-| **Overall Accuracy (All 128 Pairs)** | 37.5% (48/128) | **65.6% (84/128)** | **+28.1%** |
+| **Training Split Accuracy (76 Pairs)** | 38.2% (29/76) | **50.0% (38/76)** | **+11.8%** |
 | **Validation Split Accuracy (27 Pairs)** | 37.0% (10/27) | **48.1% (13/27)** | **+11.1%** |
-| **High-Confidence Merge Precision** | 22.4% | **85.7%** | **+63.3%** |
-| **Abstention Rate (`insufficient_evidence`)** | 0.0% | **8.6%** | Calibrated Safety |
-| **Coverage Rate** | 100.0% (forced guess) | **91.4%** | Selective Risk |
+| **Generalization Gap (`Train - Val`)** | +1.2% | **+1.9%** | **PASS (`< 25.0%` threshold)** |
+| **FLP Version-Pairs Validation Recall (n=200)** | N/A | **99.0% (198/200)** | High version recall |
+| **Hard-Negative False Merges (Train, 76 Pairs)** | 26.3% (20/76) | **0.0% (0/76)** | **100% reduction on train** |
+| **Hard-Negative False Merges (Val, 28 Pairs)** | 25.0% (7/28) | **14.3% (4/28)** | **Role 3 target: 0/28** |
+
+### Subcomponent Benchmark Scorecards (`python -m triage.cli bench --role all`)
+
+Run `.venv/bin/python3 -m triage.cli bench --role <1|2|3|all>` to inspect each role's split-safe baseline scorecard:
+- **Role 1 (Ingestion Normalizer & Version Classifier)**: Tracks `probable_duplicate`, `probable_version`, and `parallel_split_cluster` F1 across `training` and `validation`, plus **Noisy-Docket Merge Recovery** (`Train 4/11 | Val 1/6`) and **FLP Version-Pairs Validation Recall** (`99.0%`).
+- **Role 2 (Citation Topology & Page Disambiguator)**: Tracks `shared_page_ambiguity` (`Train F1 48.8% | Val F1 62.5%`) and `citation_data_error` F1, plus **Hard-Negative Citation/Page False Merges (Val)** (`0/12`).
+- **Role 3 (Litigation Lifecycle & Graph Consistency)**: Tracks `related_decision` (`Train F1 47.1% | Val F1 50.0%`) and `unrelated` F1, plus **Hard-Negative Lifecycle/Caption False Merges (Val)** (`4/16`).
 
 ### Per-Class Performance Breakdown (Validation Split)
 

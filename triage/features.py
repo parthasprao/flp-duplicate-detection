@@ -53,15 +53,27 @@ def is_stock_postconviction_or_summary(text: str) -> bool:
     return any(p in lower for p in stock_phrases)
 
 
-def detect_judgment_vs_opinion(low: Dict[str, Any], high: Dict[str, Any]) -> Tuple[bool, str]:
+def detect_judgment_vs_opinion(
+    low: Any,
+    high: Any,
+    exc_low: str = "",
+    exc_high: str = "",
+) -> Tuple[bool, str]:
     """Detect if one cluster represents a judgment/order and the other an opinion."""
-    names = [
-        (low.get("case_name") or "").lower(),
-        (high.get("case_name") or "").lower(),
-        (low.get("case_name_full") or "").lower(),
-        (high.get("case_name_full") or "").lower(),
-    ]
-    all_text = " ".join(names)
+    if isinstance(low, str) and isinstance(high, str):
+        all_text = f"{low.lower()} {high.lower()}"
+    else:
+        low_d = low if isinstance(low, dict) else {}
+        high_d = high if isinstance(high, dict) else {}
+        parts = [
+            (low_d.get("case_name") or "").lower(),
+            (high_d.get("case_name") or "").lower(),
+            (low_d.get("case_name_full") or "").lower(),
+            (high_d.get("case_name_full") or "").lower(),
+            (exc_low or "")[:200].lower(),
+            (exc_high or "")[:200].lower(),
+        ]
+        all_text = " ".join(parts)
     has_judgment = "judgment" in all_text or "order" in all_text
     has_opinion = "opinion" in all_text or "memorandum" in all_text
     if has_judgment and has_opinion:
@@ -105,7 +117,7 @@ def extract_enriched_features(row: Dict[str, Any]) -> Dict[str, Any]:
     high_is_stock = is_stock_postconviction_or_summary(exc_high)
 
     # Judgment vs opinion
-    is_j_vs_op, j_vs_op_reason = detect_judgment_vs_opinion(low, high)
+    is_j_vs_op, j_vs_op_reason = detect_judgment_vs_opinion(low, high, exc_low, exc_high)
 
     # SCOTUS cert denial bug (CourtListener data quality defect)
     court_low = (low.get("court_id") or "").lower()

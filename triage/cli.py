@@ -9,6 +9,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from triage.agent import analyze_with_agent
+from triage.bench import (
+    run_all_benches,
+    run_role1_bench,
+    run_role2_bench,
+    run_role3_bench,
+)
 from triage.constants import (
     LABEL_INSUFFICIENT,
     MERGE_LABELS,
@@ -19,7 +25,12 @@ from triage.export import (
     export_submission,
 )
 from triage.graph import build_connected_components, reconcile_graph_predictions
-from triage.io import find_default_data_dir, load_dataset
+from triage.io import (
+    TestSetLockError,
+    find_default_data_dir,
+    load_dataset,
+    load_development_splits,
+)
 from triage.model import CLASS_ORDER, CalibratedTriageClassifier
 from triage.route import assign_queue_priority
 from triage.rules import classify_pair_rule
@@ -91,11 +102,9 @@ def classify_command(args: argparse.Namespace) -> None:
 
     training_records: List[Dict[str, Any]] = []
     if train_silver_path.exists():
-        silver_all = load_dataset(train_silver_path)
-        training_records.extend([r for r in silver_all if r.get("split") == "training"])
+        training_records.extend(load_development_splits(train_silver_path, splits=("training",)))
     if train_hn_path.exists():
-        hn_all = load_dataset(train_hn_path)
-        training_records.extend([r for r in hn_all if r.get("split") == "training"])
+        training_records.extend(load_development_splits(train_hn_path, splits=("training",)))
 
     print(f"Running 3-tier triage pipeline (training set size: {len(training_records)})...")
     preds = run_classification_pipeline(
@@ -129,15 +138,18 @@ def evaluate_command(args: argparse.Namespace) -> None:
                     preds_list.append(json.loads(line))
     pred_map = {p["pair_id"]: p for p in preds_list}
 
-    # Load gold
-    gold_records = load_dataset(gold_path)
-    if args.split:
-        gold_records = [r for r in gold_records if r.get("split") == args.split]
+    # Load gold with split-lock enforcement (defaults to validation)
+    target_split = args.split or "validation"
+    unlock_test = getattr(args, "unlock_test_set", False)
+    gold_records = load_dataset(
+        gold_path,
+        split=target_split,
+        allow_test_split=unlock_test,
+    )
 
     print(f"\n=======================================================")
     print(f"EVALUATION REPORT: {preds_path.name} vs {gold_path.name}")
-    if args.split:
-        print(f"Split Filter: {args.split} (Count: {len(gold_records)})")
+    print(f"Split Filter: {target_split} (Count: {len(gold_records)})")
     print(f"=======================================================\n")
 
     correct = 0
@@ -221,6 +233,20 @@ def evaluate_command(args: argparse.Namespace) -> None:
 import collections
 
 
+def bench_command(args: argparse.Namespace) -> None:
+    """CLI action: Run split-safe subcomponent or whole-project benchmarks."""
+    data_dir = Path(args.data_dir) if args.data_dir else None
+    role = str(args.role).lower()
+    if role == "1":
+        run_role1_bench(data_dir=data_dir, verbose=True)
+    elif role == "2":
+        run_role2_bench(data_dir=data_dir, verbose=True)
+    elif role == "3":
+        run_role3_bench(data_dir=data_dir, verbose=True)
+    else:
+        run_all_benches(data_dir=data_dir, verbose=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="CourtListener Duplicate Detection & Case-Identity Triage")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -237,8 +263,33 @@ def main() -> None:
     p_eval = subparsers.add_parser("evaluate", help="Evaluate predictions against gold/silver labels")
     p_eval.add_argument("predictions", help="Path to predictions file (.jsonl)")
     p_eval.add_argument("--gold", "-g", required=True, help="Path to gold dataset (.jsonl or .csv)")
-    p_eval.add_argument("--split", choices=["training", "validation", "test"], help="Filter by split")
+    p_eval.add_argument(
+        "--split",
+        choices=["training", "validation", "train_val", "test"],
+        default="validation",
+        help="Split to evaluate (default: validation; 'test' is locked unless --unlock-test-set is set)",
+    )
+    p_eval.add_argument(
+        "--unlock-test-set",
+        action="store_true",
+        help="Explicitly unlock the held-out test split (logged to outputs/.test_access_audit.log; forbidden for agents)",
+    )
     p_eval.set_defaults(func=evaluate_command)
+
+    # Bench
+    p_bench = subparsers.add_parser(
+        "bench",
+        help="Run split-safe subcomponent (Role 1/2/3) or whole-project benchmark on training & validation splits",
+    )
+    p_bench.add_argument(
+        "--role",
+        "-r",
+        choices=["1", "2", "3", "all"],
+        default="all",
+        help="Which benchmark suite to run (1=Normalizer/Versions, 2=Citations/SharedPage, 3=Lifecycle/Graph, all=Full)",
+    )
+    p_bench.add_argument("--data-dir", help="Optional override for hackathon data directory")
+    p_bench.set_defaults(func=bench_command)
 
     args = parser.parse_args()
     args.func(args)
