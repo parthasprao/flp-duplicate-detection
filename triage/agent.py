@@ -5,7 +5,8 @@ Implements the official NYU Law Hackathon prompt recipes:
 2. Version vs Duplicate: Distinguishes re-scraped identical files from slip/revised versions.
 3. Adjudication: Analyzes AI disagreements on candidate pairs.
 
-Supports Gemini, OpenAI, Anthropic, and a zero-dependency deterministic Offline Analyzer.
+Supports OpenRouter (tiered between GLM Flash for high-volume repetitive cases
+and Nemotron Ultra for complex cases), Gemini, and a zero-dependency deterministic Offline Analyzer.
 """
 
 from __future__ import annotations
@@ -28,6 +29,8 @@ from triage.constants import (
 )
 from triage.features import extract_enriched_features
 
+DEFAULT_OPENROUTER_MODEL_FAST = "z-ai/glm-5.3-flash"
+DEFAULT_OPENROUTER_MODEL_COMPLEX = "nvidia/nemotron-4-340b-instruct"
 
 FALSIFICATION_SYSTEM_PROMPT = """You are an expert legal data engineer helping the Free Law Project / CourtListener decide whether two court decision records are the same judicial decision.
 
@@ -98,6 +101,88 @@ PAIR FEATURES:
 """
 
 
+def is_complex_pair(row: Dict[str, Any]) -> Tuple[bool, str]:
+    """Determine whether a candidate pair requires deep reasoning (Nemotron) or simple check (GLM Flash)."""
+    f = extract_enriched_features(row)
+
+    # 1. Docket conflicts
+    if f["doc_conflict"]:
+        return True, "Conflicting docket numbers detected"
+
+    # 2. Multi-cluster reporter page spans
+    if f["max_page_span"] >= 2:
+        return True, f"Multi-cluster page span ({f['max_page_span']}) creates shared-page risk"
+
+    # 3. Severe text length disparity
+    if f["len_ratio"] is not None and f["len_ratio"] < 0.35:
+        return True, f"Severe text length disparity ({f['len_ratio']:.2f}) indicates order vs substantive opinion"
+
+    # 4. Large filing date delta
+    if f["delta_days"] is not None and f["delta_days"] > 45:
+        return True, f"Filing date gap of {f['delta_days']} days indicates successive stages"
+
+    # 5. Court mismatch without standard appellate progression
+    if not f["same_court"] and not f["parent_link"]:
+        return True, "Different courts with no clear appellate link"
+
+    # 6. Specific known edge patterns (e.g. SCOTUS cert denial CAFC bug)
+    if f["is_scotus_cafc_cert_bug"]:
+        return True, "Known SCOTUS cert denial CAFC volume bug requires careful disambiguation"
+
+    return False, "Standard clean candidate pair suitable for fast inference"
+
+
+def call_openrouter(
+    prompt: str,
+    model: str,
+    api_key: str,
+    timeout: int = 20,
+) -> Optional[Dict[str, Any]]:
+    """Send structured prompt to OpenRouter API and return parsed JSON result."""
+    try:
+        import requests
+
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/freelawproject/courtlistener",
+            "X-Title": "CourtListener Duplicate Detection & Triage",
+        }
+        payload = {
+            "model": model,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": FALSIFICATION_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+        }
+
+        resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        if resp.status_code != 200:
+            return None
+
+        data = resp.json()
+        choice = data.get("choices", [{}])[0]
+        content = choice.get("message", {}).get("content", "")
+        if not content:
+            return None
+
+        # Clean markdown codeblocks if model wrapped output in ```json
+        cleaned = content.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\n?", "", cleaned)
+            cleaned = re.sub(r"\n?```$", "", cleaned)
+
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict) and "label" in parsed:
+            return parsed
+        return None
+    except Exception:
+        return None
+
+
 def run_offline_falsification(row: Dict[str, Any]) -> Dict[str, Any]:
     """Deterministic Devil's Advocate agent that runs offline without API keys."""
     f = extract_enriched_features(row)
@@ -150,6 +235,8 @@ def run_offline_falsification(row: Dict[str, Any]) -> Dict[str, Any]:
             "supporting_evidence": reasons_to_falsify,
             "contradicting_evidence": ["Passed initial candidate blocking filter"],
             "maintainer_summary": f"Falsification check broke merge hypothesis: {reasons_to_falsify[0]}. Records must stay separate.",
+            "tier": "offline",
+            "model_used": "offline_analyzer",
         }
 
     # If no falsification reasons found, positive merge is supported
@@ -165,38 +252,90 @@ def run_offline_falsification(row: Dict[str, Any]) -> Dict[str, Any]:
         ],
         "contradicting_evidence": [],
         "maintainer_summary": f"Falsification verified: records describe the same decision ({merge_type}) with no conflicting metadata.",
+        "tier": "offline",
+        "model_used": "offline_analyzer",
     }
 
 
 def analyze_with_agent(row: Dict[str, Any]) -> Dict[str, Any]:
-    """Execute Tier 2 falsification analysis using configured provider or offline fallback."""
-    provider = os.environ.get("TRIAGE_LLM", "offline").lower()
+    """Execute Tier 2 falsification analysis using configured provider or offline fallback.
 
-    # If offline or API keys missing, use offline analyzer
-    if provider == "offline":
+    Automatically handles OpenRouter tiered routing:
+    - High-volume simple candidate pairs -> GLM 5.3 Flash
+    - High-risk / complex pairs or low-confidence fast returns -> Nemotron Ultra
+    - Gracefully falls back to offline analyzer on missing keys or network failure.
+    """
+    provider = os.environ.get("TRIAGE_LLM", "offline").lower()
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+
+    # If OPENROUTER_API_KEY is present and provider wasn't explicitly set to offline/gemini, default to openrouter
+    if openrouter_key and provider not in {"offline", "gemini"}:
+        provider = "openrouter"
+
+    # 1. OpenRouter Tiered Routing
+    if provider == "openrouter":
+        if not openrouter_key:
+            return run_offline_falsification(row)
+
+        fast_model = os.environ.get("OPENROUTER_MODEL_FAST", DEFAULT_OPENROUTER_MODEL_FAST)
+        complex_model = os.environ.get("OPENROUTER_MODEL_COMPLEX", DEFAULT_OPENROUTER_MODEL_COMPLEX)
+
+        complex_flag, reason = is_complex_pair(row)
+        prompt = _build_pair_prompt(row)
+
+        # Direct complex routing for high-risk pairs
+        if complex_flag:
+            res = call_openrouter(prompt, model=complex_model, api_key=openrouter_key)
+            if res and res.get("label") in VALID_LABELS:
+                res["tier"] = "complex"
+                res["model_used"] = complex_model
+                return res
+        else:
+            # Fast inference path
+            res = call_openrouter(prompt, model=fast_model, api_key=openrouter_key)
+            # Accept if valid and confident
+            if (
+                res
+                and res.get("label") in VALID_LABELS
+                and float(res.get("confidence", 0.0)) >= 0.80
+                and res.get("label") != LABEL_INSUFFICIENT
+            ):
+                res["tier"] = "fast"
+                res["model_used"] = fast_model
+                return res
+
+            # Escalation ladder: if fast model was unconfident, abstained, or failed
+            esc_res = call_openrouter(prompt, model=complex_model, api_key=openrouter_key)
+            if esc_res and esc_res.get("label") in VALID_LABELS:
+                esc_res["tier"] = "complex"
+                esc_res["model_used"] = complex_model
+                return esc_res
+
+        # If OpenRouter failed completely, fall back to offline
         return run_offline_falsification(row)
 
-    prompt = _build_pair_prompt(row)
-
-    # Optional Gemini integration
+    # 2. Legacy Gemini integration
     if provider == "gemini":
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
+        gemini_key = os.environ.get("GEMINI_API_KEY")
+        if not gemini_key:
             return run_offline_falsification(row)
         try:
             import requests
 
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
             payload = {
-                "contents": [{"parts": [{"text": f"{FALSIFICATION_SYSTEM_PROMPT}\n\n{prompt}"}]}],
+                "contents": [{"parts": [{"text": f"{FALSIFICATION_SYSTEM_PROMPT}\n\n{_build_pair_prompt(row)}"}]}],
                 "generationConfig": {"response_mime_type": "application/json"},
             }
             resp = requests.post(url, json=payload, timeout=15)
             if resp.status_code == 200:
                 text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-                return json.loads(text)
+                parsed = json.loads(text)
+                parsed["tier"] = "fast"
+                parsed["model_used"] = "gemini-2.5-flash"
+                return parsed
         except Exception:
             return run_offline_falsification(row)
 
-    # Fallback to offline
+    # 3. Default: Offline Deterministic Analyzer
     return run_offline_falsification(row)
