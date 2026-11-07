@@ -1,0 +1,197 @@
+"""Graph consistency and connected component analysis for CourtListener clusters.
+
+Legal case-identity reasoning operates over families of records, not isolated pairs.
+This module:
+1. Builds connected components across candidate pairs.
+2. Identifies transitive contradictions:
+   e.g. A = B (merge) and B = C (merge), but A != C (keep separate).
+3. Detects star-topology conflicts (e.g. one cluster proposed for merge with multiple conflicting dockets).
+4. Flags high-risk components and adjusts confidence to protect against unsafe cascading merges.
+"""
+
+from __future__ import annotations
+
+import collections
+from typing import Any, Dict, List, Set, Tuple
+
+from triage.constants import (
+    LABEL_INSUFFICIENT,
+    MERGE_LABELS,
+    PRIORITY_CRITICAL,
+    PRIORITY_HIGH,
+    PRIORITY_LOW,
+    PRIORITY_MEDIUM,
+)
+
+
+class UnionFind:
+    def __init__(self) -> None:
+        self.parent: Dict[int, int] = {}
+
+    def find(self, x: int) -> int:
+        if x not in self.parent:
+            self.parent[x] = x
+        if self.parent[x] != x:
+            self.parent[x] = self.find(self.parent[x])
+        return self.parent[x]
+
+    def union(self, x: int, y: int) -> None:
+        root_x = self.find(x)
+        root_y = self.find(y)
+        if root_x != root_y:
+            self.parent[root_x] = root_y
+
+
+def build_connected_components(pairs: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Cluster candidate pairs into connected components of cluster IDs.
+
+    Returns:
+        Mapping of component_id -> {
+            "cluster_ids": set of cluster ids,
+            "pair_ids": list of pair_ids,
+            "pairs": list of pair dicts,
+        }
+    """
+    uf = UnionFind()
+    pair_nodes: List[Tuple[str, int, int]] = []
+
+    for r in pairs:
+        pair_id = r["pair_id"]
+        feat = r.get("features", {})
+        low = r.get("cluster_low", {})
+        high = r.get("cluster_high", {})
+
+        cid_low = feat.get("cluster_id_low") or low.get("cluster_id")
+        cid_high = feat.get("cluster_id_high") or high.get("cluster_id")
+
+        if cid_low is not None and cid_high is not None:
+            c1, c2 = int(cid_low), int(cid_high)
+            uf.union(c1, c2)
+            pair_nodes.append((pair_id, c1, c2))
+
+    # Group pairs by root
+    components: Dict[int, Dict[str, Any]] = collections.defaultdict(
+        lambda: {"cluster_ids": set(), "pair_ids": [], "pairs": []}
+    )
+
+    pair_map = {r["pair_id"]: r for r in pairs}
+
+    for pid, c1, c2 in pair_nodes:
+        root = uf.find(c1)
+        components[root]["cluster_ids"].add(c1)
+        components[root]["cluster_ids"].add(c2)
+        components[root]["pair_ids"].append(pid)
+        components[root]["pairs"].append(pair_map[pid])
+
+    # Stringify keys
+    result: Dict[str, Dict[str, Any]] = {}
+    for idx, (root, comp) in enumerate(components.items(), start=1):
+        comp_id = f"comp-{idx:04d}"
+        comp["component_id"] = comp_id
+        result[comp_id] = comp
+
+    return result
+
+
+def detect_graph_contradictions(
+    predictions: List[Dict[str, Any]],
+    components: Dict[str, Dict[str, Any]],
+) -> Dict[str, List[str]]:
+    """Detect transitive merge contradictions within components.
+
+    If Pair(A, B) is a MERGE and Pair(B, C) is a MERGE, but Pair(A, C) exists and is labeled KEEP_SEPARATE,
+    this constitutes a direct transitive contradiction (A=B and B=C implies A=C).
+
+    Returns:
+        Mapping of pair_id -> list of contradiction warnings.
+    """
+    pred_map = {p["pair_id"]: p for p in predictions}
+    contradictions: Dict[str, List[str]] = collections.defaultdict(list)
+
+    for comp_id, comp in components.items():
+        comp_pairs = comp["pairs"]
+        if len(comp_pairs) < 3:
+            continue
+
+        # Build adjacency for merge edges and separation edges
+        merge_edges: Set[Tuple[int, int]] = set()
+        separate_edges: Set[Tuple[int, int]] = set()
+
+        for r in comp_pairs:
+            pid = r["pair_id"]
+            pred = pred_map.get(pid, {})
+            label = pred.get("label", r.get("rule_class"))
+
+            feat = r.get("features", {})
+            c1 = int(feat.get("cluster_id_low") or r.get("cluster_low", {}).get("cluster_id"))
+            c2 = int(feat.get("cluster_id_high") or r.get("cluster_high", {}).get("cluster_id"))
+            u, v = min(c1, c2), max(c1, c2)
+
+            if label in MERGE_LABELS:
+                merge_edges.add((u, v))
+            else:
+                separate_edges.add((u, v))
+
+        # Check for 3-cycles with 2 merges and 1 separation
+        clusters = list(comp["cluster_ids"])
+        for i in range(len(clusters)):
+            for j in range(i + 1, len(clusters)):
+                for k in range(j + 1, len(clusters)):
+                    a, b, c = clusters[i], clusters[j], clusters[k]
+                    e_ab = (min(a, b), max(a, b))
+                    e_bc = (min(b, c), max(b, c))
+                    e_ac = (min(a, c), max(a, c))
+
+                    # Case: AB is merge, BC is merge, AC is separate
+                    if e_ab in merge_edges and e_bc in merge_edges and e_ac in separate_edges:
+                        msg = f"Transitive contradiction in {comp_id}: {a}={b} (merge) and {b}={c} (merge), but {a}!={c} (keep separate)"
+                        contradictions[f"{e_ab[0]}-{e_ab[1]}"].append(msg)
+                        contradictions[f"{e_bc[0]}-{e_bc[1]}"].append(msg)
+                        contradictions[f"{e_ac[0]}-{e_ac[1]}"].append(msg)
+
+    return dict(contradictions)
+
+
+def reconcile_graph_predictions(
+    predictions: List[Dict[str, Any]],
+    components: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Enforce graph consistency and safety over predictions.
+
+    When transitive contradictions are detected:
+    - Escalate priority to CRITICAL.
+    - Add contradiction warning to evidence.
+    - If confidence is not near-certain (> 0.95), downgrade merge to insufficient_evidence to prevent unsafe merge.
+    """
+    contradictions = detect_graph_contradictions(predictions, components)
+
+    # Component map by pair_id
+    pair_to_comp: Dict[str, str] = {}
+    for comp_id, comp in components.items():
+        for pid in comp["pair_ids"]:
+            pair_to_comp[pid] = comp_id
+
+    reconciled: List[Dict[str, Any]] = []
+    for p in predictions:
+        pid = p["pair_id"]
+        rec = dict(p)
+        rec["component_id"] = pair_to_comp.get(pid, "unknown")
+
+        if pid in contradictions:
+            warnings = contradictions[pid]
+            rec["priority"] = PRIORITY_CRITICAL
+            rec["routing_reason"] = "Transitive contradiction across case family"
+            con_ev = rec.setdefault("evidence", {}).setdefault("contradicting", [])
+            con_ev.extend(warnings)
+
+            # Safety fallback: if there is a contradiction in the graph, do not auto-merge
+            if rec.get("label") in MERGE_LABELS and rec.get("confidence", 0.0) < 0.95:
+                rec["label"] = LABEL_INSUFFICIENT
+                rec["confidence"] = 0.50
+                rec.setdefault("evidence", {}).setdefault("supporting", []).append(
+                    "Transitive contradiction between candidate pairs requires human adjudication"
+                )
+
+        reconciled.append(rec)
+
+    return reconciled

@@ -1,0 +1,33 @@
+# --- FLP / hackathon data guardrails -------------------------------------
+# The raw hackathon package contains Free Law Project files (flp_*) that must
+# never be committed to a (potentially public) repository. Keep the whole
+# package out of git; point the tools at it via TRIAGE_DATA_DIR instead.
+nyu-law-hackathon-2026-duplicates/
+**/flp_*
+**/flp_raw_*/
+*versioned_opinion_ids*
+
+# Generated outputs that may contain CourtListener excerpts / FLP-derived data
+outputs/
+!outputs/.gitkeep
+
+# Secrets & local env
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+scratch/

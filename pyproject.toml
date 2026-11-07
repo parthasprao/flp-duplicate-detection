@@ -1,0 +1,24 @@
+[project]
+name = "flp-duplicate-detection"
+version = "0.1.0"
+description = "Ingestion duplicate classification and review queue for Free Law Project / CourtListener"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "streamlit>=1.35.0",
+    "scikit-learn>=1.4.0",
+    "pandas>=2.0.0",
+    "requests>=2.31.0",
+]
+
+[project.scripts]
+triage = "triage.cli:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+pythonpath = ["."]
