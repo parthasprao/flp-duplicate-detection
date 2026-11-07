@@ -1,16 +1,22 @@
-"""Single-page CourtListener review UI. Analysis remains in the triage package."""
+"""CourtListener Case-Identity Triage: Maintainer Review Queue Workbench.
+
+A dual-mode review application for Free Law Project / CourtListener data maintainers:
+- Blind Review Mode: Unanchored human assessment with post-decision reveal.
+- Co-Pilot Mode: Agent-guided falsification analysis, side-by-side metadata diffs, and connected-family consistency.
+- Maintainer Export: Decision logs and dry-run ClusterRedirection ORM payloads.
+"""
 
 from __future__ import annotations
 
 import difflib
 import json
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from tempfile import TemporaryDirectory
-from typing import Any
-from urllib.parse import urlparse
+from typing import Any, Dict, List, Optional
 
+# Ensure repository root is on sys.path for robust execution across all launch methods
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -20,426 +26,412 @@ import streamlit as st
 
 from triage.agent import analyze_with_agent, run_offline_falsification
 from triage.constants import (
+    CLUSTER_REDIRECTION_MAP,
+    LABEL_CITATION_TOPOLOGY_UNVERIFIED,
     LABEL_INSUFFICIENT,
+    LABEL_PARALLEL_SPLIT,
     LABEL_PROBABLE_DUPLICATE,
     LABEL_PROBABLE_VERSION,
     LABEL_RELATED_DECISION,
+    LABEL_SHARED_PAGE,
+    LABEL_UNRELATED,
     MERGE_LABELS,
+    PRIORITY_CRITICAL,
+    PRIORITY_HIGH,
+    PRIORITY_LOW,
+    PRIORITY_MEDIUM,
     VALID_LABELS,
 )
-from triage.export import export_courtlistener_dry_run_payloads, export_decision_log
+from triage.export import (
+    export_courtlistener_dry_run_payloads,
+    export_decision_log,
+)
 from triage.graph import build_connected_components, reconcile_graph_predictions
-from triage.io import find_default_data_dir, load_dataset, load_development_splits
+from triage.io import find_default_data_dir, load_dataset
 from triage.model import CalibratedTriageClassifier
-from triage.route import assign_queue_priority
 
-PRIORITIES = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
-LABEL_NAMES = {
-    "probable_duplicate": "Probable duplicate",
-    "probable_version": "Alternate version",
-    "parallel_split_cluster": "Parallel / split cluster",
-    "related_decision": "Related but distinct decision",
-    "shared_page_ambiguity": "Shared reporter page",
-    "citation_data_error": "Citation data error",
-    "unrelated": "Unrelated decisions",
-    "insufficient_evidence": "Insufficient evidence",
-}
-DEMO_PATH = REPO_ROOT / "demo_data" / "sample_candidates.jsonl"
+# Page configuration
+st.set_page_config(
+    page_title="CourtListener Case-Identity Review Queue",
+    page_icon="⚖️",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 
-def display(value: Any) -> str:
-    """Do not confuse missing information with a negative signal."""
-    return "Not available" if value is None or value == "" else str(value)
+@st.cache_data
+def load_all_data() -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+    data_dir = find_default_data_dir()
+    candidates_path = data_dir / "candidates.jsonl"
+    if not candidates_path.exists():
+        candidates_path = data_dir / "candidates.csv"
 
-
-def yes_no(value: Any) -> str:
-    if value is None or value == "":
-        return "Not available"
-    if value in (True, 1, "1", "True", "true"):
-        return "Yes"
-    if value in (False, 0, "0", "False", "false"):
-        return "No"
-    return "Not available"
-
-
-def courtlistener_url(record: dict, explicit: str | None = None) -> str | None:
-    """Only offer CourtListener links; demo IDs never call this helper."""
-    if explicit:
-        parsed = urlparse(explicit)
-        if parsed.scheme == "https" and parsed.netloc in {
-            "courtlistener.com", "www.courtlistener.com",
-        }:
-            return explicit
-    cid = str(record.get("cluster_id") or "")
-    return f"https://www.courtlistener.com/opinion/{cid}/" if cid.isdigit() else None
-
-
-@st.cache_data(show_spinner=False)
-def load_all_data(
-    source: str, source_mtime: int, training_path: str, training_mtime: int
-) -> tuple[list[dict], dict]:
-    """Cache by source identity; never use held-out data for UI development."""
-    path = Path(source)
-    if path.name in {"dev_silver.jsonl", "hard_negatives.jsonl", "adjudicate_me.jsonl"}:
-        records = load_development_splits(path)
+    # Default to candidates if present, else dev_silver
+    if candidates_path.exists():
+        records = load_dataset(candidates_path)
     else:
-        records = [r for r in load_dataset(path) if r.get("split") != "test"]
+        records = load_dataset(data_dir / "dev_silver.jsonl")
+
+    # Load dev_silver to fit classifier
+    silver_path = data_dir / "dev_silver.jsonl"
+    training_rows = []
+    if silver_path.exists():
+        silver_all = load_dataset(silver_path)
+        training_rows.extend([r for r in silver_all if r.get("split") == "training"])
+
     classifier = CalibratedTriageClassifier()
-    if training_path:
-        classifier.fit(load_development_splits(training_path, splits=("training",)))
-    predictions = []
-    for row in records:
-        label, confidence, supporting, contradicting = classifier.predict_pair(row)
-        predictions.append({
-            "pair_id": row["pair_id"], "label": label, "confidence": confidence,
-            "evidence": {"supporting": supporting, "contradicting": contradicting},
+    if training_rows:
+        classifier.fit(training_rows)
+
+    initial_preds = []
+    for r in records:
+        lbl, conf, sup, con = classifier.predict_pair(r)
+        r["pred_label"] = lbl
+        r["pred_conf"] = conf
+        r["pred_sup"] = sup
+        r["pred_con"] = con
+        initial_preds.append({
+            "pair_id": r["pair_id"],
+            "label": lbl,
+            "confidence": conf,
+            "evidence": {"supporting": sup, "contradicting": con},
         })
+
     components = build_connected_components(records)
-    reconciled = reconcile_graph_predictions(predictions, components)
-    predictions_by_id = {
-        p["pair_id"]: assign_queue_priority(p) for p in reconciled
-    }
-    for row in records:
-        row.update(predictions_by_id[row["pair_id"]])
-    records.sort(key=lambda r: (
-        PRIORITIES.index(r.get("priority", "LOW")), str(r["pair_id"])
-    ))
+    reconciled = reconcile_graph_predictions(initial_preds, components)
+
+    rec_map = {p["pair_id"]: p for p in reconciled}
+    for r in records:
+        p = rec_map.get(r["pair_id"], {})
+        r["priority"] = p.get("priority", PRIORITY_LOW)
+        r["routing_reason"] = p.get("routing_reason", "")
+        r["component_id"] = p.get("component_id", "")
+        r["label"] = p.get("label", r["pred_label"])
+        r["confidence"] = p.get("confidence", r["pred_conf"])
+        r["evidence"] = p.get("evidence", {"supporting": r["pred_sup"], "contradicting": r["pred_con"]})
+
     return records, components
 
 
-def export_bytes(decisions: list[dict]) -> tuple[bytes, bytes]:
-    """Use the existing exporters without shared server-side output files."""
-    if not decisions:
-        return b"", b"[]"
-    with TemporaryDirectory(prefix="courtlistener-review-") as directory:
-        csv_path = Path(directory) / "decisions.csv"
-        json_path = Path(directory) / "dry_run.json"
-        export_decision_log(decisions, csv_path)
-        export_courtlistener_dry_run_payloads(decisions, json_path)
-        return csv_path.read_bytes(), json_path.read_bytes()
-
-
-def record_decision(pair: dict, label: str, mode: str, demo: bool) -> None:
-    """Button callback: save before rerendering so confirmations are never stale."""
-    pid = pair["pair_id"]
-    low = (pair.get("cluster_low") or {}).get("cluster_id")
-    high = (pair.get("cluster_high") or {}).get("cluster_id")
-    evidence = pair.get("evidence") or {}
-    blind = mode == "Blind Review"
-    revealed = pid in st.session_state.revealed_pairs
-    decision = {
-        "pair_id": pid, "decision": label,
-        "reviewer": st.session_state.get("reviewer", "").strip() or "maintainer",
-        "review_mode": mode,
-        "reason": st.session_state.get(f"notes_{pid}", "").strip(),
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "evidence_cited": st.session_state.get(f"evidence_{pid}", "").strip(),
-        "evidence": {
-            "reviewer_notes": st.session_state.get(f"notes_{pid}", "").strip(),
-            "reviewer_citations": st.session_state.get(f"evidence_{pid}", "").strip(),
-            "machine_evidence": evidence if not blind or revealed else {},
-            "recommendation_visible": not blind or revealed,
-            "synthetic_demo": demo,
-        },
-    }
-    if label in MERGE_LABELS:
-        keep = st.session_state.get(f"keep_{pid}", low)
-        decision.update(keep_cluster_id=keep, delete_cluster_id=high if keep == low else low)
-    st.session_state.decisions[pid] = decision
-    # Freeze the first judgment separately from any later changes.
-    st.session_state.initial_decisions.setdefault(pid, dict(decision))
-
-
-def render_record(record: dict, side: str, explicit_url: str | None, demo: bool) -> None:
-    st.subheader(f"Record {side}")
-    st.write(display(record.get("case_name")))
-    docket = record.get("docket") or {}
-    court = record.get("court") or {}
-    citations = record.get("citations") or []
-    values = {
-        "Cluster ID": record.get("cluster_id"),
-        "Court": court.get("short_name") or record.get("court_id"),
-        "Filed": record.get("date_filed"),
-        "Docket": docket.get("docket_number") or record.get("docket_number"),
-        "Citations": ", ".join(
-            str(c.get("citation_key") or "") for c in citations if isinstance(c, dict)
-        ) or None,
-    }
-    for title, value in values.items():
-        st.write(f"**{title}:** {display(value)}")
-    if record.get("case_name_full"):
-        st.caption(record["case_name_full"])
-    link = courtlistener_url(record, explicit_url) if not demo else None
-    if link:
-        st.link_button("View on CourtListener", link)
-
-
-def render_evidence(pair: dict) -> None:
-    with st.expander("Machine recommendation and evidence", expanded=True):
-        left, right = st.columns([1, 2])
-        with left:
-            st.caption("Proposed relationship")
-            # Metric values truncate long relationship names on laptop screens.
-            # Normal text wraps without custom CSS or a responsive-layout framework.
-            st.markdown(f"**{LABEL_NAMES.get(pair['label'], pair['label'])}**")
-            st.metric("Model confidence", f"{pair.get('confidence', 0):.1%}")
-            st.caption("Machine recommendation, not an approved action.")
-        with right:
-            evidence = pair.get("evidence") or {}
-            for heading, key in [("Supporting evidence", "supporting"),
-                                 ("Contradicting evidence", "contradicting")]:
-                st.markdown(f"**{heading}**")
-                for item in evidence.get(key) or ["None supplied"]:
-                    st.write(f"• {item}")
-
-
-def render_comparison(pair: dict, demo: bool) -> None:
-    st.header("Case comparison")
-    low, high = pair.get("cluster_low") or {}, pair.get("cluster_high") or {}
-    for column, record, side in zip(st.columns(2), [low, high], ["A", "B"]):
-        with column:
-            render_record(record, side, pair.get(
-                "courtlistener_url_low" if side == "A" else "courtlistener_url_high"
-            ), demo)
-    features = pair.get("features") or {}
-    conflict = yes_no(features.get("docket_numbers_conflict"))
-    docket = "Conflict" if conflict == "Yes" else (
-        "Same" if yes_no(features.get("same_docket_number")) == "Yes"
-        else "Different" if conflict == "No" and yes_no(
-            features.get("same_docket_number")) == "No" else "Not available"
-    )
-    signals = {
-        "Same court": yes_no(features.get("same_court")),
-        "Docket status": docket,
-        "Date gap (days)": display(features.get("filing_date_delta_days")),
-        "Shared citations": display(features.get("shared_citations")),
-        "Hamming distance": display(features.get("min_hamming")),
-        "Text length ratio": display(features.get("text_length_ratio")),
-    }
-    items = list(signals.items())
-    for offset in range(0, len(items), 3):
-        for column, (title, value) in zip(st.columns(3), items[offset:offset + 3]):
-            column.markdown(f"**{title}**")
-            column.write(value)
-    st.caption("Signals are supplied by the data/pipeline; missing values are not mismatches.")
-    court_a, court_b = low.get("court_id"), high.get("court_id")
-    supplied_same_court = yes_no(features.get("same_court"))
-    if (
-        court_a and court_b and supplied_same_court != "Not available"
-        and (supplied_same_court == "Yes") != (court_a == court_b)
-    ):
-        st.warning(
-            "Source-data inconsistency: the supplied 'Same court' signal conflicts "
-            "with the displayed court IDs. The UI has not changed the signal or "
-            "prediction; check the source before relying on this evidence."
-        )
-    excerpts = [pair.get("excerpt_low") or "", pair.get("excerpt_high") or ""]
-    with st.expander("Text excerpts and differences", expanded=True):
-        for column, side, text in zip(st.columns(2), ["A", "B"], excerpts):
-            with column:
-                st.text_area(f"Record {side} excerpt", text or "No text excerpt available",
-                             height=200, disabled=True, key=f"text_{pair['pair_id']}_{side}")
-        if all(excerpts):
-            difference = "\n".join(difflib.unified_diff(
-                excerpts[0].splitlines(), excerpts[1].splitlines(),
-                fromfile="Record A", tofile="Record B", lineterm="",
-            ))
-            if difference:
-                st.code(difference, language="diff")
-            else:
-                st.caption("The available excerpts are identical; full texts may still differ.")
-
-
-def render_decisions(pair: dict, mode: str, demo: bool) -> None:
-    pid = pair["pair_id"]
-    st.header("Human review")
-    existing = st.session_state.decisions.get(pid)
-    if existing:
-        st.success(f"Recorded: {LABEL_NAMES[existing['decision']]} — {existing['timestamp']}")
-        if existing.get("reason"):
-            st.write(existing["reason"])
-    for key, value in {
-        f"notes_{pid}": (existing or {}).get("reason", ""),
-        f"evidence_{pid}": (existing or {}).get("evidence_cited", ""),
-    }.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
-    st.text_area("Review notes", key=f"notes_{pid}", height=80)
-    st.text_input("Evidence cited (source link or passage)", key=f"evidence_{pid}")
-    st.caption("Use a decision button below to save these fields with your review.")
-    low = (pair.get("cluster_low") or {}).get("cluster_id")
-    high = (pair.get("cluster_high") or {}).get("cluster_id")
-    valid_ids = low is not None and high is not None and low != high
-    if valid_ids:
-        if f"keep_{pid}" not in st.session_state:
-            saved_keep = (existing or {}).get("keep_cluster_id", low)
-            st.session_state[f"keep_{pid}"] = saved_keep if saved_keep in (low, high) else low
-        st.radio("Proposed surviving cluster (for duplicate/version proposals only)",
-                 [low, high], format_func=lambda cid: f"Cluster {cid}",
-                 horizontal=True, key=f"keep_{pid}")
-    separate_labels = sorted(VALID_LABELS - MERGE_LABELS - {LABEL_INSUFFICIENT})
-    if f"separate_{pid}" not in st.session_state:
-        saved_label = (existing or {}).get("decision")
-        st.session_state[f"separate_{pid}"] = (
-            saved_label if saved_label in separate_labels else LABEL_RELATED_DECISION
-        )
-    separate = st.selectbox("Keep-separate category", separate_labels,
-                           format_func=LABEL_NAMES.get, key=f"separate_{pid}")
-    actions = [
-        ("Confirm Duplicate", LABEL_PROBABLE_DUPLICATE),
-        ("Mark as Version", LABEL_PROBABLE_VERSION),
-        ("Keep Separate", separate),
-        ("Defer", LABEL_INSUFFICIENT),
-    ]
-    for column, (title, label) in zip(st.columns(4), actions):
-        column.button(title, key=f"decision_{pid}_{label}", use_container_width=True,
-                      disabled=label in MERGE_LABELS and not valid_ids,
-                      on_click=record_decision, args=(pair, label, mode, demo))
-    st.caption("Records a review decision only. No CourtListener database changes are executed.")
-
-
 def main() -> None:
-    st.set_page_config(page_title="CourtListener Review Workbench", page_icon="⚖️", layout="wide")
-    st.title("CourtListener Case-Identity Review")
-    st.caption("Compare records, inspect evidence, and prepare non-destructive review exports.")
-    data_dir = find_default_data_dir().resolve()
-    available = [p for p in [data_dir / "candidates.jsonl", data_dir / "candidates.csv",
-                             data_dir / "dev_silver.jsonl"] if p.exists()]
-    if DEMO_PATH.exists():
-        available.append(DEMO_PATH)
-    if not available:
-        st.error("No candidate files found. Set TRIAGE_DATA_DIR or add the synthetic demo file.")
-        return
+    st.title("⚖️ CourtListener Case-Identity Triage Workbench")
+    st.caption("Evidence-backed review queue for Free Law Project / CourtListener data maintainers")
+
+    records, components = load_all_data()
+
+    # Session state for decisions
+    if "decisions" not in st.session_state:
+        st.session_state.decisions = {}
+    if "current_idx" not in st.session_state:
+        st.session_state.current_idx = 0
+    if "revealed_pairs" not in st.session_state:
+        st.session_state.revealed_pairs = set()
+
+    # Sidebar: Filters and Queue Metrics
     with st.sidebar:
-        st.header("Review queue")
-        source = st.selectbox("Dataset", available, key="dataset", format_func=lambda p: (
-            "Synthetic demo (practice only)" if p == DEMO_PATH else p.name
-        ))
-    demo = source == DEMO_PATH
-    if st.session_state.get("source") != str(source):
-        for key in list(st.session_state):
-            if key not in {"reviewer", "dataset"}:
-                del st.session_state[key]
-        st.session_state.source = str(source)
-    for key, default in [
-        ("decisions", {}), ("initial_decisions", {}), ("revealed_pairs", set()), ("agent_results", {}),
-    ]:
-        if key not in st.session_state:
-            st.session_state[key] = default
-    training = data_dir / "dev_silver.jsonl"
-    training_path = str(training) if training.exists() and not demo else ""
-    try:
-        with st.spinner("Loading the review queue…"):
-            records, components = load_all_data(
-                str(source), source.stat().st_mtime_ns, training_path,
-                training.stat().st_mtime_ns if training_path else 0,
-            )
-    except (OSError, ValueError, KeyError, TypeError):
-        st.error("Could not load this dataset. Check its JSONL/CSV format and required pair metadata.")
-        return
-    if demo:
-        st.info("Synthetic demo data — practice only. IDs are not live CourtListener records.")
-    with st.sidebar:
-        mode = st.radio("Review mode", ["Agent-Guided Co-Pilot", "Blind Review"])
-        blind = mode == "Blind Review"
-        priority = st.selectbox("Priority", ["ALL"] + PRIORITIES, disabled=blind)
-        label = st.selectbox("Predicted relationship", ["ALL"] + sorted(VALID_LABELS),
-                             format_func=lambda v: LABEL_NAMES.get(v, v), disabled=blind)
-        if blind:
-            st.caption("Prediction-based filters and priority ordering are not used in blind mode.")
-        status = st.radio("Review status", ["All pairs", "Unreviewed", "Reviewed"])
-        st.text_input("Reviewer name", key="reviewer")
-        reviewed = len(st.session_state.decisions)
-        st.progress(reviewed / len(records) if records else 0)
-        st.caption(f"{reviewed} / {len(records)} reviewed")
-        st.warning("Decisions are session-only. Download them before leaving or restarting.")
-        st.subheader("Exports")
-        st.caption("Only your recorded decisions are included — never unreviewed predictions.")
-        decisions = list(st.session_state.decisions.values())
-        csv_bytes, json_bytes = export_bytes(decisions)
-        proposals = json.loads(json_bytes)
-        prefix = "synthetic_demo_" if demo else ""
-        st.download_button("Download decision log (CSV)", csv_bytes,
-                           file_name=f"{prefix}decision_log.csv", mime="text/csv",
-                           disabled=not decisions, use_container_width=True)
-        st.download_button("Download dry-run proposals (JSON)", json_bytes,
-                           file_name=f"{prefix}dry_run.json", mime="application/json",
-                           disabled=not proposals, use_container_width=True)
-        st.caption(f"{len(decisions)} decisions · {len(proposals)} dry-run proposals")
-        if proposals:
-            with st.expander("Preview dry-run proposals"):
-                st.json(proposals)
-    filtered = [
-        r for r in records
-        if (blind or priority == "ALL" or r["priority"] == priority)
-        and (blind or label == "ALL" or r["label"] == label)
-        and (status == "All pairs"
-             or (status == "Reviewed") == (r["pair_id"] in st.session_state.decisions))
-    ]
-    if blind:
-        filtered.sort(key=lambda r: str(r["pair_id"]))
+        st.header("📋 Triage Queue Filters")
+        prio_filter = st.selectbox(
+            "Priority Tier",
+            options=["ALL", PRIORITY_CRITICAL, PRIORITY_HIGH, PRIORITY_MEDIUM, PRIORITY_LOW],
+            index=0,
+        )
+        label_filter = st.selectbox(
+            "Target Label",
+            options=["ALL"] + sorted(list(VALID_LABELS)),
+            index=0,
+        )
+        status_filter = st.radio(
+            "Review Status",
+            options=["All Pairs", "Unreviewed", "Reviewed"],
+            index=0,
+        )
+
+        st.markdown("---")
+        st.subheader("⚙️ Review Mode")
+        review_mode = st.radio(
+            "Mode",
+            options=["Agent-Guided Co-Pilot", "Blind Review (Unanchored)"],
+            index=0,
+            help="Blind mode hides model recommendations until the reviewer renders an initial judgment.",
+        )
+
+        st.markdown("---")
+        # Review Queue Progress
+        total_pairs = len(records)
+        reviewed_count = len(st.session_state.decisions)
+        progress = reviewed_count / total_pairs if total_pairs > 0 else 0.0
+        st.subheader("📊 Session Progress")
+        st.progress(progress)
+        st.write(f"Reviewed: **{reviewed_count}** / {total_pairs} ({progress:.1%})")
+
+        # Export Actions
+        st.markdown("---")
+        st.subheader("💾 Maintainer Exports")
+        if st.button("Export Decision Log (CSV)", use_container_width=True):
+            log_path = Path("outputs/maintainer_decision_log.csv")
+            dec_list = list(st.session_state.decisions.values())
+            export_decision_log(dec_list, log_path)
+            st.success(f"Saved {len(dec_list)} decisions to {log_path.name}")
+
+        if st.button("Export Dry-Run Redirection Payloads", use_container_width=True):
+            payload_path = Path("outputs/courtlistener_dry_run_payloads.json")
+            dec_list = list(st.session_state.decisions.values())
+            # Include both reviewed decisions and high-priority predictions
+            items_to_export = dec_list if dec_list else [r for r in records if r["label"] in MERGE_LABELS]
+            export_courtlistener_dry_run_payloads(items_to_export, payload_path)
+            st.success(f"Generated payloads at {payload_path.name}")
+
+    # Filter records
+    filtered = []
+    for idx, r in enumerate(records):
+        pid = r["pair_id"]
+        is_rev = pid in st.session_state.decisions
+        if status_filter == "Unreviewed" and is_rev:
+            continue
+        if status_filter == "Reviewed" and not is_rev:
+            continue
+        if prio_filter != "ALL" and r.get("priority") != prio_filter:
+            continue
+        if label_filter != "ALL" and r.get("label") != label_filter:
+            continue
+        filtered.append((idx, r))
+
     if not filtered:
-        st.info("No pairs match these filters.")
+        st.warning("No candidate pairs match the current filter criteria.")
         return
-    ids = [r["pair_id"] for r in filtered]
-    by_id = {r["pair_id"]: r for r in filtered}
-    if st.session_state.get("selected_pair") not in ids:
-        st.session_state.selected_pair = ids[0]
 
-    def navigate(offset: int) -> None:
-        index = ids.index(st.session_state.selected_pair)
-        st.session_state.selected_pair = ids[max(0, min(index + offset, len(ids) - 1))]
+    # Pagination / Pair Selector
+    col_nav1, col_nav2, col_nav3 = st.columns([2, 5, 2])
+    with col_nav1:
+        if st.button("⬅️ Previous") and st.session_state.current_idx > 0:
+            st.session_state.current_idx -= 1
+    with col_nav3:
+        if st.button("Next ➡️") and st.session_state.current_idx < len(filtered) - 1:
+            st.session_state.current_idx += 1
 
-    position = ids.index(st.session_state.selected_pair)
-    previous, selector, following = st.columns([1, 4, 1])
-    previous.button("Previous", disabled=position == 0, on_click=navigate, args=(-1,))
-    with selector:
-        pid = st.selectbox("Candidate pair", ids, key="selected_pair")
-    following.button("Next", disabled=position == len(ids) - 1, on_click=navigate, args=(1,))
-    pair = by_id[pid]
-    st.caption(f"Pair {ids.index(pid) + 1} of {len(ids)} · ID: {pid}")
-    revealed = pid in st.session_state.revealed_pairs
-    if not blind or revealed:
-        st.write(f"**Priority: {pair['priority']}** — {pair.get('routing_reason', '')}")
-        render_evidence(pair)
+    # Ensure index within bounds
+    st.session_state.current_idx = min(st.session_state.current_idx, len(filtered) - 1)
+    orig_idx, current_pair = filtered[st.session_state.current_idx]
+
+    with col_nav2:
+        st.markdown(
+            f"<div style='text-align: center; font-weight: bold;'>Pair {st.session_state.current_idx + 1} of {len(filtered)} "
+            f"(ID: <code>{current_pair['pair_id']}</code>)</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("---")
+
+    # Priority & Routing Banner
+    prio = current_pair.get("priority", PRIORITY_LOW)
+    prio_color = {
+        PRIORITY_CRITICAL: "red",
+        PRIORITY_HIGH: "orange",
+        PRIORITY_MEDIUM: "blue",
+        PRIORITY_LOW: "gray",
+    }.get(prio, "gray")
+
+    st.markdown(
+        f"**Queue Priority:** <span style='color:white; background-color:{prio_color}; padding:2px 8px; border-radius:4px; font-weight:bold;'>{prio}</span> "
+        f"— *{current_pair.get('routing_reason')}*",
+        unsafe_allow_html=True,
+    )
+    if current_pair.get("label") == LABEL_CITATION_TOPOLOGY_UNVERIFIED:
+        st.info(
+            "This pair shares a citation, but the data does not show how many distinct decisions appear on that reporter page. Verify the original page before choosing between shared-page ambiguity and citation-data error."
+        )
+
+    # Co-pilot vs Blind display
+    is_blind = "Blind" in review_mode
+    is_revealed = current_pair["pair_id"] in st.session_state.revealed_pairs
+
+    if not is_blind or is_revealed:
+        # Machine Recommendation Box
+        with st.expander("🤖 Machine Ingestion Classification & Evidence", expanded=True):
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                st.metric("Proposed Relationship", current_pair.get("label", "Unknown"))
+                st.metric("Calibrated Confidence", f"{current_pair.get('confidence', 0.5):.1%}")
+            with c2:
+                sup = current_pair.get("evidence", {}).get("supporting", [])
+                con = current_pair.get("evidence", {}).get("contradicting", [])
+                st.markdown("**Supporting Evidence:**")
+                for s in sup:
+                    st.markdown(f"- ✅ {s}")
+                if con:
+                    st.markdown("**Contradicting Evidence:**")
+                    for c in con:
+                        st.markdown(f"- ⚠️ {c}")
     else:
-        st.info("Blind review: the machine recommendation is hidden.")
-        if st.button("Reveal machine recommendation"):
-            st.session_state.revealed_pairs.add(pid)
+        st.info("🔒 **Blind Review Mode Active:** Machine recommendations are hidden to prevent anchoring bias. Review the records below and choose your decision, or click 'Reveal AI Recommendation'.")
+        if st.button("👁️ Reveal AI Recommendation"):
+            st.session_state.revealed_pairs.add(current_pair["pair_id"])
             st.rerun()
-    render_comparison(pair, demo)
-    if not blind or revealed:
-        st.header("Falsification check")
-        st.caption("Demo uses offline analysis. Other datasets use the configured provider, "
-                   "which may send metadata/excerpts to an external model.")
-        if st.button("Run Falsification Agent Check"):
-            with st.spinner("Checking for contradictory evidence…"):
-                try:
-                    st.session_state.agent_results[pid] = (
-                        run_offline_falsification(pair) if demo else analyze_with_agent(pair)
-                    )
-                except Exception as exc:
-                    st.warning("The analysis could not complete. Your review decisions are unchanged.")
-                    st.caption(f"Reason: {type(exc).__name__} — {exc}")
-        result = st.session_state.agent_results.get(pid)
-        if result:
-            st.caption(f"Inference tier: {result.get('tier', 'offline')} · "
-                       f"Model: {result.get('model_used', 'offline_analyzer')}")
-            st.info(display(result.get("falsification_finding")))
-            st.write(display(result.get("maintainer_summary")))
-        component = components.get(pair.get("component_id"), {})
-        if len(component.get("pairs", [])) > 1:
-            with st.expander("Connected case family"):
-                st.caption(f"{len(component['cluster_ids'])} clusters · "
-                           f"{len(component['pairs'])} candidate pairs")
-                st.dataframe(pd.DataFrame([{
-                    "Pair": r["pair_id"],
-                    "Record A": (r.get("cluster_low") or {}).get("case_name"),
-                    "Record B": (r.get("cluster_high") or {}).get("case_name"),
-                    "Prediction": LABEL_NAMES.get(r.get("label"), r.get("label")),
-                    "Priority": r.get("priority"),
-                } for r in component["pairs"]]), use_container_width=True, hide_index=True)
-    render_decisions(pair, mode, demo)
+
+    # Side-by-side Record Inspection
+    low = current_pair.get("cluster_low", {})
+    high = current_pair.get("cluster_high", {})
+    feat = current_pair.get("features", {})
+
+    st.subheader("🔍 Case Metadata Comparison")
+    col_low, col_high = st.columns(2)
+
+    with col_low:
+        st.markdown(f"### Record Low (Cluster `{low.get('cluster_id')}`)")
+        st.markdown(f"**Case Name:** `{low.get('case_name')}`")
+        if low.get("case_name_full"):
+            st.caption(f"Full: {low.get('case_name_full')}")
+        st.markdown(f"**Court:** `{low.get('court', {}).get('short_name') or low.get('court_id')}`")
+        st.markdown(f"**Date Filed:** `{low.get('date_filed')}`")
+        st.markdown(f"**Docket:** `{low.get('docket', {}).get('docket_number')}`")
+        cits_low = [c.get("citation_key", "") for c in low.get("citations", [])]
+        st.markdown(f"**Citations:** `{', '.join(cits_low) if cits_low else 'None'}`")
+        cl_url_low = current_pair.get("courtlistener_url_low") or f"https://www.courtlistener.com/opinion/{low.get('cluster_id')}/"
+        st.markdown(f"[🌐 View on CourtListener]({cl_url_low})")
+
+    with col_high:
+        st.markdown(f"### Record High (Cluster `{high.get('cluster_id')}`)")
+        st.markdown(f"**Case Name:** `{high.get('case_name')}`")
+        if high.get("case_name_full"):
+            st.caption(f"Full: {high.get('case_name_full')}")
+        st.markdown(f"**Court:** `{high.get('court', {}).get('short_name') or high.get('court_id')}`")
+        st.markdown(f"**Date Filed:** `{high.get('date_filed')}`")
+        st.markdown(f"**Docket:** `{high.get('docket', {}).get('docket_number')}`")
+        cits_high = [c.get("citation_key", "") for c in high.get("citations", [])]
+        st.markdown(f"**Citations:** `{', '.join(cits_high) if cits_high else 'None'}`")
+        cl_url_high = current_pair.get("courtlistener_url_high") or f"https://www.courtlistener.com/opinion/{high.get('cluster_id')}/"
+        st.markdown(f"[🌐 View on CourtListener]({cl_url_high})")
+
+    # Metadata Feature Badges
+    st.markdown("---")
+    st.markdown("#### ⚖️ Structural Feature Signals")
+    f_cols = st.columns(7)
+    with f_cols[0]:
+        st.metric("Same Court", "Yes" if feat.get("same_court") else "No")
+    with f_cols[1]:
+        doc_status = "Conflict ❌" if feat.get("docket_numbers_conflict") else ("Same ✅" if feat.get("same_docket_number") else "Different")
+        st.metric("Docket Status", doc_status)
+    with f_cols[2]:
+        st.metric("Date Gap", f"{feat.get('filing_date_delta_days')} days" if feat.get("filing_date_delta_days") is not None else "N/A")
+    with f_cols[3]:
+        st.metric("Shared Citations", f"{feat.get('shared_citations', 0)}")
+    with f_cols[4]:
+        st.metric("Hamming Distance", f"{feat.get('min_hamming')}" if feat.get("min_hamming") is not None else "N/A")
+    with f_cols[5]:
+        st.metric("Length Ratio", f"{feat.get('text_length_ratio'):.2f}" if feat.get("text_length_ratio") is not None else "N/A")
+    with f_cols[6]:
+        page_decisions = feat.get("distinct_decisions_on_shared_page")
+        st.metric("Decisions on Page", page_decisions if page_decisions is not None else "Unverified")
+
+    # Excerpt Comparison
+    exc_low = current_pair.get("excerpt_low", "")
+    exc_high = current_pair.get("excerpt_high", "")
+    if exc_low or exc_high:
+        st.markdown("---")
+        st.subheader("📜 Text Excerpt Inspection")
+        t_col1, t_col2 = st.columns(2)
+        with t_col1:
+            st.text_area("Low Cluster Excerpt", value=exc_low if exc_low else "[No text excerpt]", height=200, disabled=True)
+        with t_col2:
+            st.text_area("High Cluster Excerpt", value=exc_high if exc_high else "[No text excerpt]", height=200, disabled=True)
+
+    # Tier 2 Falsification Agent Trigger
+    st.markdown("---")
+    st.subheader("🕵️ Tier 2: Falsification Devil's Advocate Analysis")
+    if st.button("Run Falsification Agent Check"):
+        with st.spinner("Analyzing merge hypothesis and testing for contradictions..."):
+            agent_output = analyze_with_agent(current_pair)
+            tier = agent_output.get("tier", "offline")
+            model = agent_output.get("model_used", "offline_analyzer")
+            tier_badge = {
+                "fast": "⚡ GLM 5.3 Flash (Fast Inference)",
+                "complex": "🧠 Nemotron Ultra (Deep Reasoning)",
+                "offline": "🛡️ Offline Rule Analyzer",
+            }.get(tier, tier)
+
+            st.markdown(f"**Inference Tier:** `{tier_badge}` (Model: `{model}`)")
+            st.info(f"**Agent Finding:** {agent_output.get('falsification_finding')}")
+            st.write(f"**Maintainer Summary:** {agent_output.get('maintainer_summary')}")
+
+    # Connected Family View (if component > 1)
+    comp_id = current_pair.get("component_id")
+    if comp_id and comp_id in components and len(components[comp_id]["pairs"]) > 1:
+        comp_info = components[comp_id]
+        with st.expander(f"🌐 Connected Case Family ({comp_id}: {len(comp_info['cluster_ids'])} clusters, {len(comp_info['pairs'])} pairs)"):
+            st.write(f"Clusters in family: `{list(comp_info['cluster_ids'])}`")
+            fam_rows = []
+            for p in comp_info["pairs"]:
+                fam_rows.append({
+                    "pair_id": p["pair_id"],
+                    "low": p.get("cluster_low", {}).get("case_name"),
+                    "high": p.get("cluster_high", {}).get("case_name"),
+                    "prediction": p.get("label"),
+                    "priority": p.get("priority"),
+                })
+            st.dataframe(pd.DataFrame(fam_rows), use_container_width=True)
+
+    # Maintainer Decision Action Section
+    st.markdown("---")
+    st.subheader("✍️ Maintainer Adjudication & Action")
+
+    pid = current_pair["pair_id"]
+    existing_dec = st.session_state.decisions.get(pid, {})
+
+    dec_cols = st.columns(4)
+    with dec_cols[0]:
+        if st.button("✅ Confirm Duplicate (Merge)", use_container_width=True):
+            st.session_state.decisions[pid] = {
+                "pair_id": pid,
+                "decision": LABEL_PROBABLE_DUPLICATE,
+                "keep_cluster_id": low.get("cluster_id"),
+                "delete_cluster_id": high.get("cluster_id"),
+                "reviewer": "maintainer",
+                "review_mode": review_mode,
+                "reason": "Confirmed duplicate decision via review queue",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            st.rerun()
+
+    with dec_cols[1]:
+        if st.button("📄 Mark as Version", use_container_width=True):
+            st.session_state.decisions[pid] = {
+                "pair_id": pid,
+                "decision": LABEL_PROBABLE_VERSION,
+                "keep_cluster_id": low.get("cluster_id"),
+                "delete_cluster_id": high.get("cluster_id"),
+                "reviewer": "maintainer",
+                "review_mode": review_mode,
+                "reason": "Confirmed alternate version (slip/published)",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            st.rerun()
+
+    with dec_cols[2]:
+        if st.button("❌ Keep Separate (Distinct)", use_container_width=True):
+            st.session_state.decisions[pid] = {
+                "pair_id": pid,
+                "decision": LABEL_RELATED_DECISION if feat.get("same_court") else LABEL_UNRELATED,
+                "reviewer": "maintainer",
+                "review_mode": review_mode,
+                "reason": "Records represent distinct legal proceedings",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            st.rerun()
+
+    with dec_cols[3]:
+        if st.button("⏳ Defer (Insufficient Data)", use_container_width=True):
+            st.session_state.decisions[pid] = {
+                "pair_id": pid,
+                "decision": LABEL_INSUFFICIENT,
+                "reviewer": "maintainer",
+                "review_mode": review_mode,
+                "reason": "Deferred: requires full text or docket inspection",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            st.rerun()
+
+    if existing_dec:
+        st.success(f"Recorded Decision: **{existing_dec.get('decision')}** ({existing_dec.get('reason')}) at {existing_dec.get('timestamp')}")
 
 
 if __name__ == "__main__":
