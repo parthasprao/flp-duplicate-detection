@@ -236,18 +236,23 @@ def classify_pair_rule(row: Dict[str, Any]) -> Tuple[str, float, List[str], List
         supporting.append("Identical source file SHA-1 or normalized text hash with matching court and title")
         return LABEL_PROBABLE_DUPLICATE, 0.99, supporting, contradicting
 
-    # Near-exact duplicate text with consistent docket and court
+    # Near-exact duplicate text with consistent docket and court (near-zero divergence)
+    has_slip_citation_diff = (
+        (len(low.get("citations") or []) > 0 and len(high.get("citations") or []) == 0)
+        or (len(high.get("citations") or []) > 0 and len(low.get("citations") or []) == 0)
+    )
     if (
         f["title_exact"]
         and f["same_court"]
         and f["same_doc_num"]
         and not f["doc_conflict"]
         and (f["delta_days"] is None or f["delta_days"] <= 5)
-        and (f["len_ratio"] is None or f["len_ratio"] >= 0.85)
-        and (f["min_ham"] is not None and f["min_ham"] <= 5)
+        and (f["len_ratio"] is not None and f["len_ratio"] >= 0.98)
+        and (f["min_ham"] is not None and f["min_ham"] <= 1)
+        and not has_slip_citation_diff
     ):
         supporting.append(
-            f"Same court, docket number, exact title, and near-identical text (Hamming distance: {f['min_ham']})"
+            f"Same court, docket number, exact title, and near-zero text divergence (Hamming distance: {f['min_ham']}, length ratio: {f['len_ratio']:.2f})"
         )
         return LABEL_PROBABLE_DUPLICATE, 0.92, supporting, contradicting
 
@@ -363,14 +368,14 @@ def classify_pair_rule(row: Dict[str, Any]) -> Tuple[str, float, List[str], List
         f["title_exact"]
         and (f["same_court"] or f["parent_link"])
         and (f["delta_days"] is None or f["delta_days"] <= 30)
-        and (f["len_ratio"] is not None and f["len_ratio"] >= 0.65)
+        and (f["len_ratio"] is not None and f["len_ratio"] >= 0.60)
         and (f["min_ham"] is not None and f["min_ham"] <= 18)
         and not f["doc_conflict"]
     ):
         supporting.append(
             f"Same judicial decision in alternate versions (Hamming distance: {f['min_ham']}, length ratio: {f['len_ratio']:.2f})"
         )
-        return LABEL_PROBABLE_VERSION, 0.84, supporting, contradicting
+        return LABEL_PROBABLE_VERSION, 0.88, supporting, contradicting
 
     # Excerpt Jaccard high match
     # Excerpts are only the first few hundred characters (mostly caption headers), so

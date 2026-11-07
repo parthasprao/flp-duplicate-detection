@@ -17,7 +17,7 @@ from triage.constants import (
     LABEL_PROBABLE_VERSION,
     MERGE_LABELS,
 )
-from triage.features import extract_enriched_features
+from triage.features import extract_enriched_features, normalize_docket_number
 from triage.io import _normalize_flp_version_row, find_default_data_dir
 from triage.rules import classify_pair_rule
 
@@ -149,3 +149,65 @@ def test_role1_benchmark_runs_strictly_on_train_and_val() -> None:
     assert res["train"]["merge_precision"] >= 0.80
     if res["flp_val_recall"] is not None:
         assert res["flp_val_recall"] >= 0.85
+
+
+def test_normalize_docket_number_patterns() -> None:
+    """Verify generalizable docket number transformations across common jurisdictional patterns."""
+    # Procedural prefixes and initials
+    assert normalize_docket_number("Civil Action 08-1963 (JDB)") == "2008-1963"
+    assert normalize_docket_number("Civil Action No. 2008-1963") == "2008-1963"
+    assert normalize_docket_number("Civil Action 09-01642 (ESH)") == "2009-1642"
+    assert normalize_docket_number("Civil Action No. 2009-1642") == "2009-1642"
+
+    # State district prefixes
+    assert normalize_docket_number("3D14-3142") == "2014-3142"
+    assert normalize_docket_number("14-3142") == "2014-3142"
+
+    # Unicode dashes and status words
+    assert normalize_docket_number("4-99-0979 Rel") == "4-1999-979"
+    assert normalize_docket_number("No. 4 — 99—0979") == "4-1999-979"
+
+    # 2-digit vs 4-digit years with sequence padding
+    assert normalize_docket_number("No. 93-200") == "1993-200"
+    assert normalize_docket_number("1993-0200") == "1993-200"
+    assert normalize_docket_number("No. 94-896") == "1994-896"
+    assert normalize_docket_number("1994-0896") == "1994-896"
+    assert normalize_docket_number("78-2957") == "1978-2957"
+    assert normalize_docket_number("No. 78-2957") == "1978-2957"
+
+
+def test_role1_noisy_docket_recovery_in_features() -> None:
+    """Verify that formatting differences in docket numbers do not trigger false docket_numbers_conflict."""
+    row = {
+        "pair_id": "synth-001",
+        "features": {
+            "docket_numbers_conflict": 1,
+            "same_docket_number": 0,
+            "same_court": 1,
+            "min_hamming": 2,
+            "text_length_ratio": 0.98,
+            "shared_sha1": 0,
+            "shared_text_sha256": 0,
+            "title_exact": 1,
+            "filing_date_delta_days": 0,
+            "shared_citations": 0,
+            "disjoint_reporters": 0,
+        },
+        "cluster_low": {
+            "case_name": "Acme Corp. v. United States",
+            "court_id": "dcdistct",
+            "docket": {"docket_number": "Civil Action 08-1963 (JDB)", "docket_number_core": "08001963"},
+        },
+        "cluster_high": {
+            "case_name": "Acme Corp. v. United States",
+            "court_id": "dcdistct",
+            "docket": {"docket_number": "Civil Action No. 2008-1963", "docket_number_core": None},
+        },
+    }
+    enriched = extract_enriched_features(row)
+    assert enriched["same_doc_num"] is True
+    assert enriched["doc_conflict"] is False
+
+    label, conf, _, _ = classify_pair_rule(row)
+    assert label == LABEL_PROBABLE_VERSION
+    assert conf >= 0.85
