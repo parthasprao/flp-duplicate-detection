@@ -60,6 +60,99 @@ _OPINION_HEADING = re.compile(r"^\s*(?:MEMORANDUM\s+)?OPINION\b[^\n]*$", re.MULT
 _HEADER_WINDOW = 800
 
 
+def normalize_docket_number(docket_str: str) -> str:
+    """Normalize a docket number string to a canonical comparable format.
+
+    - Strips procedural prefixes ('Civil Action No.', 'Civil Action', 'Case No.', 'No.', 'Appeal No.', etc.)
+    - Normalizes Unicode dashes ('—', '–') to standard hyphens ('-')
+    - Strips trailing judge initials and status tokens ('(JDB)', '(ESH)', 'Rel', 'Slip Op')
+    - Normalizes state district prefixes ('3D14-3142' -> '14-3142' -> '2014-3142')
+    - Normalizes 2-digit vs 4-digit year-sequence pairs ('08-1963' / '2008-1963', '93-200' / '1993-0200')
+    """
+    if not docket_str or not isinstance(docket_str, str):
+        return ""
+    s = docket_str.strip()
+    s = re.sub(r"[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]", "-", s)
+    s = re.sub(r"\s*\([A-Za-z0-9\s\.\-]+\)\s*$", "", s)
+    s = re.sub(r"\s+(?:rel|slip\s+op|order)\b", "", s, flags=re.IGNORECASE)
+    s = s.strip(" .,;:")
+    s = re.sub(
+        r"^(?:civil\s+action\s+no\.?|civil\s+action|case\s+no\.?|appeal\s+no\.?|docket\s+no\.?|nos?\.?)\s*",
+        "",
+        s,
+        flags=re.IGNORECASE,
+    )
+    s = re.sub(r"^(\d+)d(?=\d{2,4}-\d+)", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s*-\s*", "-", s)
+    s = re.sub(r"\bno\.?\s*", "", s, flags=re.IGNORECASE)
+
+    m = re.match(r"^(\d{1,2})-(\d{2,4})-(\d+)$", s)
+    if m:
+        dist, yr, seq = m.group(1), m.group(2), m.group(3)
+        if len(yr) == 2:
+            yr_int = int(yr)
+            yr = str(1900 + yr_int if yr_int >= 50 else 2000 + yr_int)
+        return f"{dist}-{yr}-{int(seq)}"
+
+    m = re.match(r"^(\d{2,4})-(\d+)$", s)
+    if m:
+        yr, seq = m.group(1), m.group(2)
+        if len(yr) == 2:
+            yr_int = int(yr)
+            yr = str(1900 + yr_int if yr_int >= 50 else 2000 + yr_int)
+        return f"{yr}-{int(seq)}"
+
+    return s.lower().strip()
+
+
+def extract_docket_tokens(cluster: Dict[str, Any]) -> Set[str]:
+    """Extract all normalized docket tokens and core representations from a cluster dict."""
+    tokens: Set[str] = set()
+    if not isinstance(cluster, dict):
+        return tokens
+    candidates = []
+    d = cluster.get("docket")
+    if isinstance(d, dict):
+        if d.get("docket_number"):
+            candidates.append(str(d["docket_number"]))
+        if d.get("docket_number_core"):
+            core = str(d["docket_number_core"]).strip()
+            candidates.append(core)
+            if len(core) == 8 and core.isdigit():
+                yy = int(core[:2])
+                yr = 1900 + yy if yy >= 50 else 2000 + yy
+                seq = int(core[2:])
+                tokens.add(f"{yr}-{seq}")
+    if cluster.get("docket_number"):
+        candidates.append(str(cluster["docket_number"]))
+    if cluster.get("docket_number_core"):
+        candidates.append(str(cluster["docket_number_core"]))
+
+    for cand in candidates:
+        norm = normalize_docket_number(cand)
+        if norm and any(c.isdigit() for c in norm):
+            tokens.add(norm)
+        for sub in re.split(r"[,;]+", cand):
+            sub_norm = normalize_docket_number(sub)
+            if sub_norm and any(c.isdigit() for c in sub_norm):
+                tokens.add(sub_norm)
+            for tok in sub.strip().split():
+                if any(c.isdigit() for c in tok):
+                    tok_norm = normalize_docket_number(tok)
+                    if tok_norm and any(c.isdigit() for c in tok_norm):
+                        tokens.add(tok_norm)
+    return tokens
+
+
+def get_reporter_family(cit_key: str) -> str:
+    """Extract canonical reporter family from citation key (e.g. '915|F2D|469' -> 'F')."""
+    if not cit_key:
+        return ""
+    parts = cit_key.split("|")
+    rep = parts[1].upper() if len(parts) >= 2 else cit_key.upper()
+    return re.sub(r"(?:2D|3D|4TH|5TH|NS)$", "", rep).strip()
+
+
 def _instrument_type(text: str) -> str:
     """Classify an excerpt's header as 'judgment', 'opinion' or '' (unknown)."""
     head = (text or "")[:_HEADER_WINDOW]
@@ -157,6 +250,22 @@ def extract_enriched_features(row: Dict[str, Any]) -> Dict[str, Any]:
     shared_text_sha = bool(feat.get("shared_text_sha256"))
     disjoint_rep = bool(feat.get("disjoint_reporters"))
     title_exact = bool(feat.get("title_exact") or feat.get("title_sorted_exact"))
+
+    # Normalized core docket matching
+    tokens_low = extract_docket_tokens(low)
+    tokens_high = extract_docket_tokens(high)
+    if tokens_low and tokens_high and (tokens_low & tokens_high):
+        same_doc_num = True
+        doc_conflict = False
+
+    # True disjoint reporters verification
+    if disjoint_rep and shared_cits == 0:
+        cits_l = [c.get("citation_key") or "" for c in (low.get("citations") or []) if isinstance(c, dict)]
+        cits_h = [c.get("citation_key") or "" for c in (high.get("citations") or []) if isinstance(c, dict)]
+        reps_l = {get_reporter_family(c) for c in cits_l if c}
+        reps_h = {get_reporter_family(c) for c in cits_h if c}
+        if reps_l and reps_h and (reps_l & reps_h):
+            disjoint_rep = False
 
     # Excerpt similarity
     has_both_excerpts = bool(exc_low and exc_high)
